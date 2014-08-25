@@ -1,0 +1,297 @@
+% chap1.tex
+\ifx \allfiles \undefined
+\documentclass[a4paper]{article}
+%\usepackage[paperwidth=145mm,paperheight=99.5mm,text={134mm,120mm},left=6mm,top=-7mm]{geometry} % 页面设置
+\usepackage[left=30mm, right=30mm,top=30mm]{geometry} % 页面设置
+\usepackage{comment}
+%\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{ctexcap}
+\usepackage[labelfont=bf,labelsep=quad]{caption}
+  \DeclareCaptionFont{kai}{\kaishu}
+  \captionsetup{textfont=kai}
+\usepackage{graphicx,floatrow,subfig}
+
+
+
+\begin{document}
+\title{Linux环境下的图形系统}
+\author{赵自成}
+\date{}\maketitle
+\else
+\chapter{Linux环境下的图形系统}
+
+\fi
+
+\graphicspath{{./}{fig/}}
+
+\section{Linux下的图形系统简介}
+
+Linux/Unix环境下最早的图形系统是Xorg图形系统，Xorg图形系统通过扩展的方式以适应显卡和桌面图形发展的需要，然而随着软硬件的发展，特别是嵌入式系统的发展，Xorg显得庞大而落后。
+
+开源社区开发开发了一些新的图形系统，比如当前嵌入式系统上流行的Andrio的图形系统，以及不久前由开源 区提出的Wayland图形系统，
+
+本节后续章节我们将先对Xorg图形系统进行介绍，然而由于Wayland和Android图形系统代表了图形系统的最新发展方向，因而我们将选择Wayland图形系统进行介绍，实际上Wayland图形系统和Android图形系统在很多方面是类似的，比如都使用EGL作为本地窗口接口，都使用OpenGL ES接口进行3D图形渲染等。
+
+\subsection{Framebuffer驱动下的基本显示}
+
+Framebuffer驱动提供基本的显示，framebuffer驱动操作的硬件就是一个显示控制器和帧缓存（一片位于系统主存或者显卡显存）。Framebuffer驱动向应用程序提供/dev/fbx的设备接口，应用程序通过读写这个设备节点实现对显示控制器和帧缓存。
+
+
+下面这个程序显示了应用程序操作操作framebuffer节点的过程。运行这个程序，将在屏幕右上方显示一个【绿色的（会有大小端的问题，所以不能说绿色）】正方形。
+\begin{verbatim}
+  8 int main ()
+  9 {
+ 10     int fd;
+ 11     struct fb_var_screeninfo vinfo;
+ 12     struct fb_fix_screeninfo finfo;
+ 13     size_t screensize = 0;
+ 14     int location;
+ 15     char *fbp = NULL, *ptr;
+ 16     int x, y, x0, y0;
+ 17     int i,j;
+ 18     int ret;
+ 19
+ 20     fd = open("/dev/fb0", O_RDWR);
+......
+ 25     ret= ioctl(fd, FBIOGET_FSCREENINFO, &finfo ) ;
+ ......
+ 30     ret = ioctl(fd, FBIOGET_VSCREENINFO, &vinfo);
+......
+ 35     ret = ioctl(fd, FBIOPAN_DISPLAY,&vinfo);
+......
+ 40     screensize=vinfo.xres * vinfo.yres * vinfo.bits_per_pixel /8 ;
+ 41     fbp = (char *)mmap(NULL, screensize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+ 48     x0 = 200;
+ 49     y0 = 200;
+ 50     ptr = fbp + y0 * finfo.line_length + x0 * vinfo.bits_per_pixel / 8;
+ 51     for( i = 0; i < 100; i++){
+ 52         char* tmp_ptr = ptr;
+ 53         for(j = 0; j < 100; j++){
+ 54             *tmp_ptr++ = 100;
+ 55             *tmp_ptr++ = 15;
+ 56             *tmp_ptr++ = 200;
+ 57             *tmp_ptr++ = 0;
+ 58         }
+ 59         ptr += finfo.line_length;
+ 60     }
+ 61     munmap(fbp,screensize);
+ 62     close(fd);
+ 63     return 0;
+ 64 }
+\end{verbatim}
+
+应用程序对framebuffer的操作主要是通过ioctl和mmap完成的。mmap将显存映射到用户空间。
+
+25行和30行分别获取当前framebuffer驱动的“固定参数”和“可变参数”，这两个参数包含了当前显示控制其的一些信息，可变参数主要是当前分辨率信息，固定参数主要是当前显存的地址。
+
+35行FBIOPAN\_DISPLAY通常用于双缓存，但是这里使用还有其它意义，在后面讨论drm的framebuffer的时候还会具体讨论。
+
+41行将显存映射出来，51-59行操作这片显存，往上绘制一个左上方坐标为（200,200）,变长为100的正方形。
+
+应用程序能够使用这些ioctl是因为内核提供了相应的接口，本书第 \verb|\ref{ch4}| 章将会描述如何写一个framebuffer驱动。
+
+
+\subsection{Xorg环境下的图形系统}
+
+Linux/unix环境下最早的图形系统是xorg图形系统，xorg图形系统通过扩展的方式以适应显卡和桌面图形发展的需要，然而随着软硬件的发展，特别是嵌入式系统的发展，Xorg显得庞大而落后。开源社区开发除了一些新的图形系统，比如当前嵌入式系统上流行的Andrio的图形系统，以及不久前由开源社区提出的Wayland图形系统，
+
+X Window（这里我们说的X、X window和Xorg意义相同）在1984年由MIT研发，X Window 的主要特点便是:Server/Client网络模型。不论是本地、远程的应用程序，都统一通过Server/Client模型来运作。X的设计哲学之一是:提供机制，而非策略。
+
+X Window在推出之后快速演化,在1987年时候,其核心协议已经是第11版本了,简称X11。这个版本已经将“提供机制,而非策略”这个哲学贯彻地非常彻底,以致于核心协议基本稳定,不需要特别大的改动。二十几年过去了了X Window的核心都没有特别大的变化,X Window在核心层之外提供一个扩展层,开发者可以开发相应扩展,来实现自己的扩展协议,所以过去二十几年X Window除了继续完善核心协议、驱动以外,很大程度上都是扩展使它保持与时俱进：
+\begin{itemize}
+  \item 多头显示支持由Xinerama扩展实现的;
+  \item 多媒体视频回放的支持由X Video扩展实现的;
+  \item OpenGL的3D支持通过GLX扩展来实现的;
+  \item Compiz那样的合成桌面特效由Composite实现;
+  \item Keyboard的支持通过X Keyboard Extension(也就是XKB)实现。
+\end{itemize}
+
+在传统的Xorg框架下面，我们考虑这样一个场景，当点击了某个应用程序窗口的按钮，会发生如果过程：
+
+\begin{enumerate}
+  \item 用鼠标点击应用程序的按钮,这时内核收到了鼠标发来的事件,并将其通过evdev输入驱动发送至了X Server。
+  \item 这时X Server可以判断哪个Window该收到这个消息，并将某座标按下按钮的消息发往X Client，也就是这里说的应用程序。但事实上X Server并不知道它得到的窗口信息是不是正确的，因为当前的Linux桌面早已经不是10年前的那样了,现在是Composite即合成桌面的时代，合成桌面的一个特点便是:Compositor(如Compiz，metacity)管理窗口的一切，X Server只能知道屏幕的某个点收到了鼠标消息,却不知道这个点下面到底有没有窗口。
+  \item 假设应用场景没这么复杂,client顺利地收到了消息,这时client要决定该如何做:按钮要有按下的效果。于是client再发送请求给X Server，请求其绘制按钮按下的效果。
+  \item 当X Server收到消息后,它就准备开始做具体的绘图工作了:首先它告诉显卡驱动,要画怎么样一个效果,然后它也计算了被改变的那块区域,同时告诉Compiz那块区域需要重新合成一下。
+  \item Compiz收到消息后,它将从缓冲里取得显卡渲染出的图形并重新合成至整个屏幕当然,Compiz的合成动作,也属于渲染(render),也是需要请求X Server,我要画这块,然后X Server回复:你可以画了。
+\end{enumerate}
+
+整个请求和渲染的动作过程,从X Client->X Server,再从X Server->Compositor,而且是双向的,确实是比较耗时的,但是,事实还不是如此。介于X Window已有的机制,尽管Compiz已经掌管了全部最终桌面呈现的效果,但X Server在收到Compiz的渲染请求时,还会做一些本职工作,如:窗口的重叠判断、被覆盖窗口的剪载计算等等，这些都是无意义的重复工作,而且Compiz不会理会这些,Compiz依然会在自己的全屏幕画布上,画着自己的动画效果。
+【以上参考资料 揭开Wayland的面纱:X Window的前生今世】
+【以上参考资料 The Wayland display server Documentation 1.0】
+
+我们注意到在步骤3和步骤4，client都是通过请求X server进行渲染的，如果是一个3D 应用程序，这将导致X cient和X server之间有大量的绘图命令请求，为了解决这个问题，在Xorg的基础上提出了dri架构（direct rending infrustrum）。【请确认是这个原因】
+
+在dri架构下，一个3D client程序的不再发送大量绘图命令给X server，client应用程序和server共享一片buffer，client应用程序链接到诸如opengl的渲染库，opengl渲染库知道如何对硬件进行编程以及如何将渲染结果输出到buffer上，compiz能够获取这片buffer并且在合成桌面的时候将其用作纹理。
+
+【上面一段参考自 The Wayland display server Documentation 1.0】
+【请参考更多资料介绍DRI】
+
+上图显示，在dri出现以前，opengl程序发送glx（X的扩展协议）命令包给X server，由X server控制3D硬件进行绘图，但是有了dri之后，应用程序可以直接访问硬件绘图，减少了通过X协议传输绘图命令包的过程，因而3D程序的渲染有了质的变化。
+
+除了DRI外，X将越来越多的事情移到了其他地方。
+在linux X Window下,一般都通过GTK+和Qt来进行了图形软件开发，而gtk+通过Cairo来绘制图形。尽管在Linux平台下,Cairo、Qt的发挥依然是基于X Window的,但X Window充其量仅仅是一个后端而已,并不是少它不行。同理,跨平台的GTK+、Qt也只是视X为其中所支持的后端之一,假如哪天X真的不在了,更换一个新后端,当前的GNOME、KDE也能完整的跑起来。
+
+另外一个例子是模式设置，过去模式设置是有X server来做的，但是现在被移到了内核中，即所谓的KMS（kernel mode setting）。
+
+可以说,这20多年来,X从什么都做已经到了做的越来越少。绝大多数的开发者开发图形应用程序,已经可以完全无视X的存在了,X现在更像是一个中间人的角色。
+
+
+\subsection{嵌入式图形系统DirectFB}
+DirectFB图形系统是一个小的嵌入式系统，这个系统上  。。。
+
+\section{Linux环境下的图形系统架构和显卡驱动}
+
+\subsection{核内和核外驱动}
+Linux是一个宏内核，设备驱动大部分都是包含在内核里面的，因此可以看到内核代码最庞大的部分是drivers目录，如果从kernel.org上面下载一个内核源码，直接编译，编译的时间大部分都耗在编译设备驱动上。
+
+像微内核的操作系统，设备驱动不是内核的部分。
+
+本书不会讨论微内核和宏内核的区别或者各自的优缺点。但是出于调试方便以及其他一些原因，Linux操作系统上面的一些驱动是放在核外的。
+
+一个主要的类别就是打印机、扫描仪这类设备，当前的打印机扫描仪通常都是通过USB 接口连接到计算机上的，对于这些设备的Linux驱动，除了USB核心部分在内核，这些打印机扫描仪本身的驱动都是在核外的。Linux上面的打印机使用CUPS系统\verb|附加CUPS 连接|，CUPS运行在核外，其驱动是按照CUPS的接口来开发的。Linux上面的扫描仪使用的是运行在核外的sane系统，其驱动是以动态链接库的形式存在的。
+
+另外一类核外的驱动是图形系统的驱动，由于图形系统、显卡本身比较复杂，而且由于一些历史原因，图形系统的驱动在核内核外都有，并且显卡驱动最主要的部分在核外，后面两节内容介绍图形系统的时候就能够看到。
+
+
+\subsection{Xorg/DRI环境下图形系统驱动}
+（“内核部分驱动”  “核外部分驱动”）
+
+\subsubsection{内核DRM驱动}
+
+当前的Linux系统上内核的显卡驱动称为drm驱动，在通常的linux内核发行版上，我们使用lsmod命令查看内核模块，能够看到如下信息：
+
+\begin{verbatim}
+radeon                933054  3
+ttm                    45600  1 radeon
+drm_kms_helper         22468  1 radeon
+drm                   162230  5 radeon,ttm,drm_kms_helper
+i2c_algo_bit            5055  2 i2c_gpio,radeon
+// 应该还有frambuffer设备节点
+\end{verbatim}
+
+我们的机器使用的是ATI的radeon显卡，上面显示了当前系统内核和显卡驱动相关的模块，drm模块是内核drm驱动的基础架构，所有使用dri架构的显卡驱动都会加载这个内核模块，ttm是ttm内核管理机制，drm\_kms\_helper是内核模式的基础框架代码，i2c\_algo\_bit是显卡上操作i2c设备使用的模块，显卡上的i2c设备主要包括了connector，encoder以及pll时钟芯片。Drm内核驱动的代码在目录drivers/gpu/drm下面。
+
+加载了drm驱动后，在/dev目录下面会生成如下设备节点：
+\begin{verbatim}
+/dev/char/226:0 -> ../dri/card0
+/dev/char/226:64 -> ../dri/controlD64
+/dev/dri/card0
+/dev/dri/controlD64
+\end{verbatim}
+其中/dev/dri/card0是操作gpu的接口，发送命令等操作都是通过对这个设备节点进行的。/dev/dri/controlD64是kms相关的设备节点。
+
+
+注意到这里除了dri目录下面的设备节点外，还有frambuffer设备节点，但是如果我们直接进行这样的操作“cat xx >/dev/fb0”，在屏幕上是看不到任何效果的，然而如果将xorg.conf的Driver修改成“fbdev”，重启Xorg，然后执行“cat xxx >/dev/fb0”操作，就能看到类似下图8-2的情况，图片上面一部分是我们拷贝进去的内容。
+
+这提示我们在radeon核外驱动正常运行的情况下，核外radeon驱动并不使用framebuffer驱动（实际上drm驱动注册的frambuffer设备只是给内核使用），在radeon核外程序正确运行后，不使用framebuffer 管理的那片内存的内容作为显示输出，而是使用了另外一片内存。
+
+然而前面\verb|\ref{framebuffer}|节给出的程序是能够在图形环境下正常运行的，这时因为我们在映射之前做了一个PAN\_DISPLAY操作，PAN\_DISPLAY操作会去操作硬件修改crtc 输出内容的显存地址，将其修改为framebuffer驱动使用的内存，这样操作后就能够看到效果了，如图\ref{drmframebuffer}。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.8]{drmframebuffer}\\
+  \caption{DRM环境下直接写framebuffer设备节点}\label{drmframebuffer}
+\end{figure}
+
+【还有许多内容需要添加】
+
+\subsubsection{核外部分驱动}
+
+Linux下的图形驱动的主要部分是核外部分，核外部分包括了xorg exa驱动以及mesa 3d 驱动，exa是传统的2D加速框架，mesa 3d驱动则是针对3D驱动的硬件加速。由于历史原因，显卡上最早只有2D部件，因而最早只有2D驱动，3D功能是后来通过mesa添加的，因此即使现在硬件上2D功能是由3D部件实现的，但是2D驱动和3D仍然是分离的。
+
+\noindent \textbf{1）2D加速驱动}
+
+Xorg中有显示驱动，过去这个驱动里面包含了模式设置，终端切换操作，Xorg通过一个称为EXA的扩展机将2D加速包含其中，而现在事实上的模式设置移植到了内核中，这个驱动除了维持Xorg的老的框架外，主要就是2D加速驱动中一些操作。
+[参考XFree86 design.pdf详细介绍xorg驱动中的驱动，添加xorg驱动框架，exa加速待后面论述]
+
+\noindent \textbf{2）3D加速驱动}
+
+在linux环境中，我们可以通过glxinfo命令插卡3D硬件图形加速是否可用。比如在radeon显卡上glxinfo的输出包含以下内容：
+\begin{verbatim}
+OpenGL renderer string: Gallium 0.4 on AMD CEDAR
+\end{verbatim}
+这里显示使用AMD CEDAR核心的显卡进行opengl 3d加速，如果硬件加速不可用，则应当是“vmware on llvmpipe”这类字眼。
+GLX是X协议的扩展，用于OpenGL和X的交互。
+
+开源的OpenGL实现是mesa，mesa向上提供OpenGL接口，下层通过硬件的mesa驱动和硬件交互。
+
+上图显示了一个3D应用程序运行的过程，OpenGL绘图程序命令被用户空间的mesa驱动翻译成对应GPU的绘图命令放入命令缓冲区中，其他的如顶点信息/纹理信息/索引信息放入到相应缓冲中，mesa驱动为每个应用程序保存了当前的绘图状态，当发生3D程序切换，当前状态被保存下来，当下次调度该程序运行的时候，先恢复该程序的绘图状态到硬件上，然后继续执行命令缓存中的命令。
+
+当用户空间调用发送命令到内核的时候，内核驱动对硬件进行编程从该程序的命令缓冲区中取命令开始执行。
+
+这个过程即是在dri框架下实现的，这里的所有绘制过程并不请求X，openg直接将命令发送给硬件。glx只是在初始化窗口，申请buffer和切换buffer的时候才会和X交互。
+
+这里讲的核外驱动，无论是2D驱动还是3D驱动，都需要内核drm驱动的支持，他们通过1.6.4节中的libdrm访问内核的drm驱动。
+
+
+\subsection{DirectFB图形系统驱动}
+
+
+
+\section{本书主要内容和使用的代码}
+
+\subsection{用于演示的内核驱动代码}
+本书后续章节使用代码有的是直接来自linux内核radeon驱动以及xf86的ati显卡驱动。
+Linux内核代码使用的版本是3.0.3，位于内核目录drivers/gpu/drm/radeon目录下面，加入KMS后的内核代码不同版本显卡驱动部分差别并不大。xf86的ati驱动使用的版本是6.14.2，libdrm版本是2.4.26。
+
+另外为了演示显卡驱动的一些基本原理，我们自己编写了一个程序，当然这些原理很大程度上和图形学本身无关，而是涉及操作系统和设备总线这个层次的原理。
+
+把内核的radeon驱动删除后，将我们的代码编成模块插入内核即可运行，内核模块自带了一些利用GPU进行绘图程序的，模块插入内核后就能够看到运行效果。
+
+在理解这个代码前，读者需要对linux内核设备驱动和pci设备驱动有一定了解。
+内核模块的入口函数是kylin\_radeon\_probe。
+
+\begin{verbatim}
+2288 static int __init kylin_radeon_probe(struct pci_dev *pdev,
+const struct pci_device_id *id)
+...
+2294     ret = pci_enable_device(pdev);
+2295     if(ret) {
+2296         printk("ERROR: pci_enable_device\n");
+2297         goto error_enable;
+2298     }
+2299     pci_set_master(pdev);
+2300     pci_set_drvdata(pdev,&rdev);
+2301     rdev.pdev = pdev;
+2302
+2303     if (pci_set_dma_mask(pdev, DMA_BIT_MASK(40))) { //
+2304         printk("radeon:No suitable DMA avaiable");
+2305     }
+2306     //map VRAM
+2307     rdev.zone[PCIVRAM_ZONE].size = (unsigned long)pci_resource_len(pdev,0);
+2308     rdev.zone[PCIVRAM_ZONE].cpu = ioremap(pci_resource_start(pdev,0),
+                    rdev.zone[PCIVRAM_ZONE].size);
+2309     if(NULL ==rdev.zone[PCIVRAM_ZONE].cpu) {
+2310         printk("ERROR: cann't ioremap PCI VRAM\n");
+2311         goto error_mapmem;
+2312     }
+2313     printk("[%s %d] vram mapped to addr: 0x%p, size: 0x%lx\n",
+2314                 __func__, __LINE__, rdev.zone[PCIVRAM_ZONE].cpu,
+2315                 rdev.zone[PCIVRAM_ZONE].size);
+2316     rdev.zone[MMIO_ZONE].size = (unsigned long)pci_resource_len(pdev,2);
+2317     rdev.zone[MMIO_ZONE].cpu = ioremap_nocache(pci_resource_start(pdev,2),
+ 										 rdev.zone[MMIO_ZONE].size);
+2318     printk("[%s %d] io mapped to addr: 0x%p, size: 0x%lx\n",
+2319                 __func__, __LINE__, rdev.zone[MMIO_ZONE].cpu,
+2320                 rdev.zone[MMIO_ZONE].size);
+2321     if(NULL == rdev.zone[MMIO_ZONE].cpu) {
+2322         printk("ERROR: cann't ioremap mmio register\n");
+2323         goto error_mapio;
+2324     }
+\end{verbatim}
+这段代码用于初始化pci设备并映射pci设备的寄存器空间和内存空间。Radeon显卡的bar 0为内存空间，bar 2为寄存器空间。
+
+后续章节我们将根据具体功能逐步说明后续代码。
+
+
+\subsection{R500和R600 DirectFB驱动代码}
+
+
+
+\ifx \allfiles \undefined
+\end{document}
+\fi

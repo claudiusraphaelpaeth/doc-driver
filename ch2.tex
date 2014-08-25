@@ -1,0 +1,1410 @@
+% chapx.tex
+
+\ifx \allfiles \undefined
+\documentclass[a4paper]{article}
+%\usepackage[paperwidth=145mm,paperheight=99.5mm,text={134mm,120mm},left=6mm,top=-7mm]{geometry} % 页面设置
+\usepackage[left=30mm, right=30mm,top=30mm]{geometry} % 页面设置
+\usepackage{comment}
+%\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{ctexcap}
+\usepackage[labelfont=bf,labelsep=quad]{caption}
+  \DeclareCaptionFont{kai}{\kaishu}
+  \captionsetup{textfont=kai}
+\usepackage{graphicx,floatrow,subfig}
+\usepackage{multirow}
+
+\begin{document}
+\title{AMD显卡工作原理}
+\author{赵自成}
+\date{\today}\maketitle
+\graphicspath{{./}{fig/}}
+\else
+\chapter{AMD显卡工作原理}
+\fi
+
+早期的显卡仅用于显示用，我们可以称为显示控制器;后来显卡中加入了2D加速部件，这些部件用于做拷屏，画点，画线等操作;随着游戏、三维模拟以及科学计算可视化等需要，对3D的需求逐渐增加，大规模的3D程序场景涉及大量的图形学计算，而在早期，图形绘制工作由CPU来完成，要达到真实感和实时效果，只能绘制一些简单的线框模型，连最基本的填充都无法实现，更不用说真实感绘制中的光照和纹理贴图。上世纪80 年代，斯坦福大学的Jim Clark教授率先提出用专用集成电路技术实现一个专用的3D图形处理器的设想，随后与他的学生创立了SGI公司，并于1984年推出了世界上第一个通用图形工作站IRIS1400。图形处理器（GPU）的出现使得图形绘制的概念彻底发生了变化。\verb|参考文献 面向移动设备的真实感图形处理器，另外请参考 Global Illumination on GPU前面两章的描述 |
+
+\section{AMD显卡简介}
+
+\subsection{AMD显卡体系结构发展历程}
+
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[width=440pt]{radeonprocess0}\\
+  \caption{Radeon显卡发展历程}\label{radeonprocess}
+\end{figure}
+
+图\ref{radeonprocess}显示了AMD GPU核的变化过程，R100是一款固定功能流水线的显卡，R200为可编程处理器，R300在R200的急促上发生了比较大的变化，此后的R400 和R300差别不大。到R500的时候GPU除了有vbios外，还引入了atombios，atombios是一段比较简单的脚本，和具体平台无关，使用特定的解释器解释执行，然而GPU 3D核较R300变化不大，寄存器变化也比较少（主要变化在pixel shader 部分）。
+
+R600在R500的基础上发生很大的变化，2D部件被废除，3D部件改成了unified shader架构，GPU的寄存器和原来完全不同，由于体系结构的变化，对硬件编程也和原来有了很大变化。R700 GPU是R600的优化版，R7xx的编程和R6xx的编程基本上是一样的，后续的Evergreen、Southern Island和Northern Island都是这种unified shader架构的延续，因此理解R600的编程后将比较容易理解后续GPU核的编程。
+
+本书的后续部分针对R600核心进行描述，总体来说，R600硬件上重要的变化包括【个人观点】：
+
+\begin{enumerate}
+  \item 不再包含2D加速部件，所有的加速都使用3D部件完成
+  \item 使用Shader Model 4.0，包含Geometry shader【详情请查阅关于shader model 4.0和geometry shader的相关资料】
+  \item 使用Unified shader架构，vertex shader、fragment shader（以及geometry shader）不再分成单独的部件，而是被统一起来。
+\end{enumerate}
+除了以上变化之外，还有一点值得注意的是，R6xx显卡GPU核的计算都是基于标量的，而不是像以前的那样基于矢量的【参考ATI Radeon? HD 2000 programming guide】
+对于软件编程而言寄存器读写方式上也有比较大的变化，过去对R5xx编程的时候，所有的对硬件的编程都是可以命令包或者普通的直接写寄存器的方式进行的，但是R6xx的部分寄存器是不能够通过直接写寄存器的方式进行编程的，必须通过3型命令包的方式进行【目前看到的代码都是这样的，R6xx寄存器手册上有很多寄存器地址都是一样的，但是含义不同，这些寄存器偏移都大于等于0x8000】，后续的代码会看到这方面的具体情况。
+
+\section{显示输出}
+\subsection{模式、Vbios和Atomios}
+\subsection{Framebuffer驱动中的模式设置}
+\subsection{Xorg图形环境下的Radeon显卡模式设置}
+\section{显存管理}
+\subsection{VRAM内存和GTT内存}\label{vramgtt}
+显卡使用的内存分为两部分，一部分是显卡自带的显存称为VRAM内存，另外一部分是系统主存称为GTT内存（graphics translation table和后面的GART含义相同，都是指显卡的页表，GTT 内存可以就理解为需要建立GPU页表的显存）。在嵌入式系统或者集成显卡上，显卡通常是不自带显存的，而是完全使用系统内存。通常显卡上的显存访存速度数倍于系统内存，因而许多数据如果是放在显卡自带显存上，其速度将明显高于使用系统内存的情况。
+
+某些内容是必须放在vram中的，比如最终用于显示的“帧缓存”，以及后面说的页表GART （graphics addres remapping table），另外有一些比如后面将介绍的命令环缓冲区（ring buffer）是要放在GTT 内存中的。另一方面，VRAM内存是有限的，如果VRAM内存使用完了，则必须将一些数据放入GTT内存中。
+
+通常GTT内存是按需分配的，而且是给设备使用的，比如radeon r600显卡最多可以使用512M系统内存，一次性分配512M连续的给设备用的内存在linux系统中是不可能成功的，而且即使可以成功，有相当多的内存是会被浪费掉的。按照按需分配的原则，使用多少就从系统内存中分配多少，这样得到的GTT内存在内存中肯定是不连续的。GPU同时需要使用VRAM内存和GTT内存，最简单的方法就是将这两片内存统一编址（这类似RISC机器上IO和MEM统一编址），VRAM是显卡自带的内存，其地址一定是连续的，但是不连续的GTT内存如果要统一编址，就必须通过页表建立映射关系了，这个页表被称为GTT（Graphics Translation Table，地址转换表）或者GART（Graphics address remapping table），这也是这些内存被称为GTT内存的原因。
+
+和CPU端地址类似，我们将GPU使用的地址称为“GPU虚拟地址”，经过查页表之后的地址称为“GPU物理地址”，这些地址是GPU最终用于访存的地址，由于GPU挂接在设备总线上，因此这里的“GPU物理地址”就是“总线地址”，当然落在vram 区域的内存是不用建页表的，这一片内存区域的地址我们只关心其“GPU 虚拟地址”。
+
+R600显卡核心存管理有关的寄存器如表\ref{memreg}示，目前并没有找到完整的描述这些寄存器的手册，表中的数据根据我们阅读代码获取到。\\
+\begin{table}[!h]%[hbp]
+\begin{tabular}{|c|c|p{5cm}|}
+\hline
+寄存器名称 & 地址 & 功能 \\
+\hline
+R600\_CONFIG\_MEMSIZE & 0x5428 & VRAM大小 \\
+\hline
+MC\_VM\_FB\_LOCATION & 0x2180 & VRAM区域在GPU虚拟地址空间的起始地址和长度 [RW]\\
+\hline
+MC\_VM\_SYSTEM\_APERTURE\_LOW\_ADDR & 0x2190 & VRAM在gpu虚拟地址空间中的起始地址[RW]  \\
+\hline
+MC\_VM\_SYSTEM\_APERTURE\_HIGH\_ADDR & 0x2194 &VRAM在gpu虚拟地址空间中的结束地址[RW] \\
+\hline
+VM\_L2\_CNTL & & Gpu L2级cache控制寄存器[RW] \\
+\hline
+MC\_VM\_L1\_TLB\_MCB & & Gpu tlb控制寄存器[RW] \\
+\hline
+VM\_CONTEXT0\_PAGE\_TABLE\_START\_ADDR & 0x1594 & GTT内存的起始地址[RW] \\
+\hline
+VM\_CONTEXT0\_PAGE\_TABLE\_END\_ADDR & 0x15B4 & GTT内存的结束地址[RW] \\
+\hline
+VM\_CONTEXT0\_PAGE\_TABLE\_BASE\_ADDR & 0x1574 & GPU页表基地址[RW] \\
+\hline
+VM\_CONTEXT0\_CNTL & 0x1410 & GPU虚拟地址空间使能寄存器[RW]\\
+\hline
+VM\_CONTEXT0\_PROTECTION\_  & 0x1554 & GPU页故障寄存器[RW]\\
+ FAULT\_DEFAULT\_ADDR & & \\
+\hline
+RADEON\_PCIE\_TX\_DISCARD & & \\
+\_RD\_ADDR\_LO/HI & & \\
+\hline
+RADEON\_PCIE\_TX\_GART\_ERROR & & \\
+\hline
+\end{tabular}
+\caption{显存管理相关的寄存器}\label{memreg}
+\end{table}
+
+
+【这一段代码修改成使用R600显卡描述】
+在Radeon显卡中，VRAM内存涉及到“visiable vram”和“real vram”两个说法，visiable vram是可以使用pci设备内存映射方式映射出来的内存，这部分内存可供软件访问，而显卡的vram还有一部分是不可见的，不能被软件直接访问[是GPU自身使用的？]，这部分内存加上visiable ram共同构成显卡的real vram。有一些显卡的vram是可以全部被访问到的，比如Loogson 2A【？？】机器使用的北桥芯片集成的RS780显卡。
+
+
+在我们使用的R580显卡上，通过读取pci配置空间可以获取到visiable vram大小为256M，读取RADEON\_CONFIG\_MEMSIZE获取real vram大小为512M，于是vram长度为512M，将vram起始地址设置为0x0,那么结束地址为0x1fffffff，然后将起始地址和结束地址写入R\_000004\_MC\_FB\_LOCATION（在r600上是）寄存器：
+\begin{verbatim}
+        rv515_mc_wreg(R_000004_MC_FB_LOCATION,
+            S_000004_MC_FB_START(rdev->vram_start >> 16) |
+            S_000004_MC_FB_TOP(rdev->vram_end >> 16));
+\end{verbatim}
+S\_000004\_MC\_FB\_START和S\_000004\_MC\_FB\_TOP两个宏的意思可以查阅我们的演示代码或者内核radeon驱动代码。
+而后是设置GTT内存和GART。GTT的大小是由驱动自己确定的，GTT大小确定后，GART占用的内存也就确定了。在R580显卡上将GTT起始地址设为0x20000000，紧接在VRAM后，为GART分配好内存后，使能页表机制的时候告知GPU GTT的位置和GART的位置：
+\begin{verbatim}
+  1 uint32_t table_addr;
+  2 uint32_t tmp = RADEON_PCIE_TX_GART_UNMAPPED_ACCESS_DISCARD;
+  3 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_CNTL, tmp);
+  4 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_START_LO, rdev->gtt_start);
+  5 tmp = rdev->gtt_end & ~RADEON_GPU_PAGE_MASK;
+  6 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_END_LO, tmp);
+  7 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_START_HI, 0);
+  8 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_END_HI, 0);
+  9 table_addr = rdev->zone[GART_ZONE].gpu;
+ 10 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_BASE, table_addr);
+ 11 /* FIXME: setup default page */
+ 12 rv370_pcie_wreg(rdev,RADEON_PCIE_TX_DISCARD_RD_ADDR_LO,rdev->vram_start);
+ 13 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_DISCARD_RD_ADDR_HI, 0);
+ 14 /* Clear error */
+ 15 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_ERROR, 0);
+ 16 tmp = rv370_pcie_rreg(rdev, RADEON_PCIE_TX_GART_CNTL);
+ 17 tmp |= RADEON_PCIE_TX_GART_EN;
+ 18 tmp |= RADEON_PCIE_TX_GART_UNMAPPED_ACCESS_DISCARD;
+ 19 rv370_pcie_wreg(rdev, RADEON_PCIE_TX_GART_CNTL, tmp);
+\end{verbatim}
+代码4,6-8行设置gtt内存起始地址，10行设置页表基地址，16-19行使能页表。
+
+
+在我们演示程序中，为了简化，GPU VRAM的使用是静态指定的。这部分代码在gpu\_virtual\_location函数中。比如为r600 blit过程对shader进行编程的代码分配内存：
+\begin{verbatim}
+ 288     rdev.zone[BLIT_ZONE].size = ALIGN(BLIT_BUF_SIZE, PAGE_SIZE);
+ 289     rdev.zone[BLIT_ZONE].gpu =rdev.zone[GTT_TABLE_ZONE].gpu -
+rdev.zone[BLIT_ZONE].size;
+ 290     rdev.zone[BLIT_ZONE].ptr = rdev.zone[BLIT_ZONE].gpu -
+rdev.zone[VRAM_ZONE].gpu +rdev.zone[VRAM_ZONE].ptr;
+\end{verbatim}
+所有分配的内存都要同时记录两个地址：用于GPU访问的GPU虚拟地址空间的地址和用于软件访问的CPU虚拟地址空间的地址。
+
+\subsection{Radeon显卡页表机制}\label{pagetable}
+GTT是显卡的页表，相比于CPU使用的3级页表，radeon GPU使用的页表比较简单，radeon GPU使用的是1级页表[是否可配置]，页表大小为4K，那么页表项的后面12位（$2^{12}$=4k）为标志位。在早期的radeon GPU中，GPU使用的页表页表项是32位的，到r600 之后GPU 页表项为64位(图\ref{r600pte})。
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{r600pte}\\
+  \caption{R600页表项}\label{r600pte}
+\end{figure}
+页表项的12位标志位中只有后6位有用，定义如下：
+\begin{verbatim}
+#define R600_PTE_VALID     (1 << 0)
+#define R600_PTE_SYSTEM    (1 << 1)
+#define R600_ PTE_SNOOPED   (1 << 2)
+#define R600_PTE_READABLE  (1 << 5)
+#define R600_PTE_WRITEABLE (1 << 6)
+\end{verbatim}
+
+GPU页表在GPU VRAM内存中，VM\_CONTEXT0\_PAGE\_TABLE\_BASE\_ADDR和\\VM\_CONTEXT0\_PAGE\_TABLE\_END\_ADDR两个寄存器表明了页表在vram中的位置。由显卡的一个寄存器表明其在GPU vram中的位置，下面这个函数实现了填页表的过程。
+
+\begin{verbatim}
+static inline void set_gpu_page(uint64_t dma_addr, uint32_t index)
+{
+    void __iomem *ptr = (void *)rdev.zone[GTT_TABLE_ZONE].cpu;
+    dma_addr &= 0xfffffffffffff000ULL;
+    dma_addr |= R600_PTE_VALID | R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+    dma_addr |=R600_PTE_READABLE |R600_PTE_WRITEABLE;
+    writeq(dma_addr, ((void __iomem *)ptr) + (index * 8));
+}
+\end{verbatim}
+
+上述函数有两个参数，dma\_addr是分配的系统内存经过映射后的总线地址，这个地址用于设备访问主存，也是我们上文说的“GPU物理地址”，后面一个参数index是页表项索引。
+代码中ptr是页表所在的内存在CPU虚拟地址空间中的地址，r600的页表项为64位，r500及以下的页表为32位。
+
+我们看一片内存的分配和映射情况。
+第三章我们将使用一个称为ring buffer的一片内存，这片内存用于放置命令，cpu将命令放置到这一片内存中，gpu从这一片内存中拿数据。
+\begin{verbatim}
+1316 int radeon_ring_init(struct pci_dev *pdev)
+1317 {
+1318     uint32_t tmp_addr;
+1319     struct page *cpu_page;
+1320     dma_addr_t dma_addr;
+1321     dma_addr_t tmp_dma_addr;
+1322     int j, i;
+1323
+1324     rdev.cp_gpu_addr = rdev.zone[RING_ZONE].gpu;
+1325     // 1M shoulb be contiguous
+1326     cpu_page = alloc_pages(GFP_DMA32|GFP_KERNEL|__GFP_ZERO,
+1327                 get_order(rdev.zone[RING_ZONE].size));
+1328     if(NULL == cpu_page) {
+1329         printk("ERROR:  cann't alloc page for ring \n");
+1330         goto alloc_error;
+1331     }
+1332     rdev.cp_ring = phys_to_virt(page_to_phys(cpu_page));
+1333     dma_addr = pci_map_page(pdev, cpu_page, 0,
+1334                 rdev.zone[RING_ZONE].size, PCI_DMA_BIDIRECTIONAL);
+1335     if(0 == dma_addr){
+1336         printk("ERROR: map ring buffer error\n");
+1337         goto map_error;
+1338     }
+1339     rdev.cp_dma_addr = dma_addr;
+1340     tmp_addr = rdev.zone[RING_ZONE].gpu;
+1341     for (j = 0; j < rdev.zone[RING_ZONE].size/PAGE_SIZE; j++) {
+1342         tmp_dma_addr = dma_addr + j * PAGE_SIZE;
+1343         tmp_dma_addr &= 0xfffffffffffff000ULL;
+1344         tmp_dma_addr |= R600_PTE_VALID | R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+1345         tmp_dma_addr |= R600_PTE_READABLE |R600_PTE_WRITEABLE;
+1346
+1347         for(i = 0;i < PAGE_SIZE/GPU_PAGE_SIZE; i++) {
+1348             set_gpu_page(tmp_dma_addr + i * GPU_PAGE_SIZE,
+1349                 (tmp_addr - rdev.zone[GTT_ZONE].gpu)>>12UL);
+1350             tmp_addr += GPU_PAGE_SIZE;
+1351         }
+1352
+1353     }
+1354     mb();
+1355     if (pcie_tlb_flush()) {
+1356         printk("ERROR: flush firstly\n");
+1357         goto flush_error;
+1358     }
+1359
+1360     rdev.cp_ptr_mask = (rdev.cp_ring_size / 4) - 1;
+1361     rdev.cp_ring_free_dw = rdev.cp_ring_size / 4;
+1362     return 0;
+1363
+1364 flush_error:
+1365     pci_unmap_page(pdev, dma_addr, rdev.zone[RING_ZONE].size,
+1366             PCI_DMA_BIDIRECTIONAL);
+1367 map_error:
+1368     free_pages((unsigned long)rdev.cp_ring,
+1369             get_order(rdev.zone[RING_ZONE].size));
+1370 alloc_error:
+1371     // wati to do??
+1372     return -1;
+1373 }
+\end{verbatim}
+
+\ref{vramgtt}节我们说过，在GPU端的虚拟地址空间中，内存（显存）是静态划分的，因而1324行是使用预先定好的地址。
+
+由于ring环必须在物理内存上连续，而且需要按照页（GPU页）对齐。Radeon GPU页为4K，主流硬件平台上主机操作系统上的页大小都是4K的整数倍，因而按照CPU页对齐就可以了。
+
+得到的cpu\_page是个struct page类型，1332行获取这片内存读应的虚拟地址。
+1333-1334行映射这片内存到pci地址空间中，获取到这片内存的总线地址。
+1341-1353行的内容为填充页表的过程，由于主机操作系统的页大小和GPU页大小可能不一致，因而要将一个GPU页拆分成$PAGE\_SIZE/GPU\_PAGE\_SIZE$个GPU页，对每个GPU页大小的内存块分别建立映射。由于最终是GPU（设备）访问内存，页表里面填的都是总线地址。
+
+1354-1358行保证页表项被填充到了页表中。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.6]{memallocate}\\
+  \caption{页映射关系}\label{memallocate}
+\end{figure}
+
+结合图\ref{memallocate}来说明内存的映射关系。
+
+这里的主机操作系统页大小为16K。现在需要在GTT内存申请一片16K（一个CPU页）内存，先从系统内存中分一片16K大小的mem1，然后将mem1分成4（$P AGE\_SIZE/GPU\_PAGE\_SIZE$）段，每一段和一个GPU页对应，一个CPU页对应4个GPU页，对应页表中的4项。然后我们需要一片更大的内存mem2，mem2在物理上没有连续的要求，但是mem2比较大，一次分不出这么大的内存，我们将mem2分成两次（或者多次）分配，每次映射一部分，通过页表映射后不连续的物理地址在GPU地址空间中变得连续了。
+
+在页表机制初始化完成后，R600显卡GPU访存按照图\ref{gpuaddressing}显示的过程进行。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{gpuaddressing}\\
+  \caption{地址转换过程}\label{gpuaddressing}
+\end{figure}
+
+如果是GTT内存，则需要查GPU页表，根据64位地址（在当前的驱动中实际上只用了32位）的前面50 位定位GPU 页表项，根据页表项内容的后12位与上0即是内存在PCI设备空间中的“页基址”，“页基址”加上原来64 位地址的后12位（页内偏移）就得到对应的总线地址。
+
+注意到由于vram和GTT统一编址，而vram并不参与这里的页表地址转换过程，因而需要有减去GTT内存基址的过程，本节代码1349行将tmp\_addr减去rdev.zone[GTT\_ZONE].gpu 就是这个原因。当然上图的整个过程是GPU硬件做的，对软件透明。
+\begin{verbatim}
+1348             set_gpu_page(tmp_dma_addr + i * GPU_PAGE_SIZE,
+1349                 (tmp_addr - rdev.zone[GTT_ZONE].gpu)>>12UL);
+\end{verbatim}
+
+在分配完所有内存后，我们的R600显存使用情况如下图示：
+\begin{verbatim}
+\begin{figure} % 修改插图
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{memusage}\\
+  \caption{显存使用情况}\label{memusage}
+\end{figure}
+\end{verbatim}
+
+从下往上看，Fb是帧缓存，blit内存主要是r600上blit操作对shader编程的一些代码，然后是gpu页表，atombios是显卡中带的一段代码，显卡可执行这段代码对显卡进行初始化，我们先将代码读到这片内存中，然后执行之，在模式设置一节将会讨论atombios。
+
+以上是必须放在vram内存上的内容，后面gtt内存。wb是write back buffer的简称，ring buffer和ib（indirect buffer）会在下章讨论。
+
+
+\subsection{Linux显存管理API}
+
+\ref{vramgtt}节中我们为了简单起见，使用的vram内存是静态分配的，但是在linux内核中是有一套完善的内存管理机制的。
+
+和操作系统里面的系统内存管理一样，这套机制比较复杂，我们这里不详细描述这套机制的具体实现，而是简单描述如何在核内核外获取和使用显存。
+
+\subsubsection{内核部分}
+
+在radeon内核驱动代码radeon\_device\_init函数中有如下代码：
+\begin{verbatim}
+drivers/gpu/drm/radeon/radeon_device.c radeon_device_init
+ 810     if (radeon_testing) {
+ 811         radeon_test_moves(rdev);
+ 812     }
+\end{verbatim}
+
+810行是一个全局变量开关，当这个开关开启的时候，驱动会做一个拷屏操作，这段代码在drivers/gpu/drm/radeon/radeon\_test.c文件中，radeon\_test\_moves做些数据拷贝操作，包括从vram到系统主存和系统主存到vram之间的数据拷贝（这个是我们直接够在radeon内核驱动代码中运行并且能够看到效果的命令处理过程）。如果我们利用radeon驱动提供的软硬件环境进行编程，可以将代码放在这个地方。
+
+\begin{verbatim}
+  1     struct radeon_bo *vram_obj = NULL;
+  2     struct radeon_bo *gtt_obj = NULL;
+  3     uint64_t vram_addr, gtt_addr;
+  4     unsigned  size;
+  5     void *vram_map, *gtt_map;
+  6
+  7     size = 1024 * 768 * 4;
+  8     r = radeon_bo_create(rdev, size, PAGE_SIZE, true,
+  9                 RADEON_GEM_DOMAIN_VRAM, &vram_obj);
+ 10     if (r) {
+ 11         DRM_ERROR("Failed to create VRAM object\n");
+ 12         goto out_cleanup;
+ 13     }
+ 14     r = radeon_bo_reserve(vram_obj, false);
+ 15     if (unlikely(r != 0))
+ 16         goto out_cleanup;
+ 17     r = radeon_bo_pin(vram_obj, RADEON_GEM_DOMAIN_VRAM, &vram_addr);
+ 18     if (r) {
+ 19
+ 20         DRM_ERROR("Failed to pin VRAM object\n");
+ 21         goto out_cleanup;
+ 22     }
+ 23     r = radeon_bo_kmap(vram_obj, &vram_map);
+ 24     if (r) {
+ 25         DRM_ERROR("Failed to map VRAM object\n");
+ 26         goto out_cleanup;
+ 27     }
+ 28
+ 29     r = radeon_bo_create(rdev, size, PAGE_SIZE, true,
+ 30                 RADEON_GEM_DOMAIN_GTT, &gtt_obj);
+ 31     if (r) {
+ 32         DRM_ERROR("Failed to create GTT object\n");
+ 33         goto out_cleanup;
+ 34     }
+ 35     r = radeon_bo_reserve(gtt_obj, false);
+ 36     if (unlikely(r != 0))
+ 37         goto out_cleanup;
+ 38     r = radeon_bo_pin(gtt_obj, RADEON_GEM_DOMAIN_GTT, &gtt_addr);
+ 39     if (r) {
+ 40         DRM_ERROR("Failed to pin GTT object\n");
+ 41         goto out_cleanup;
+ 42     }
+ 43     r = radeon_bo_kmap(gtt_obj, &gtt_map);
+ 44     if (r) {
+ 45         DRM_ERROR("Failed to map GTT object\n");
+ 46         goto out_cleanup;
+ 47     }
+ 48
+ 49 out_cleanup:
+ 50     if (vram_obj) {
+ 51         if (radeon_bo_is_reserved(vram_obj)) {
+ 52             radeon_bo_unpin(vram_obj);
+ 53             radeon_bo_unreserve(vram_obj);
+ 54         }
+ 55         radeon_bo_unref(&vram_obj);
+ 56     }
+ 57     if(gtt_obj){
+ 58         if(radeon_bo_is_reserved(gtt_obj)){
+ 59             radeon_bo_unpin(gtt_obj);
+ 60             radeon_bo_unreserve(gtt_obj);
+ 61         }
+ 62         radeon_bo_unref(&gtt_obj);
+ 63     }
+\end{verbatim}
+
+在gem内存管理机制中，所有分配的显存以上代码显示了创建两个buffer object（bo），分别从vram和gtt内存中分配内存空间，以及释放内存空间和bo的过程。
+Buffer object是显卡对显存管理的基本结构，是对一片内存的抽象，不同的显卡会有不同的定义，但是基本原理和内容大致相同，radeon显卡驱动中使用的是radeon\_bo结构来管理和描述一片显存。
+
+1-2行，这里我们有两个bo对象（分配两片显存），一片内存来自vram，另外一片来自gtt内存。
+8行，创建并初始化一个bo，分配显存。参数如下：
+\begin{description}
+  \item[rdev] radeon\_device结构体指针
+  \item[size] 该bo的大小
+  \item[True] 来自内核还是用户空间的请求，如果是内核，则分配bo结构过程是不可中断的，并且从用户空间和内核空间访问这篇显存的时候虚拟地址和物理地址间的映射关系是不同的，因而这里要做区分
+  \item[RADEON\_GEM\_DOMAIN\_VRAM] 显存位于vram还是gtt内存，radeon驱动中定义了3中类型的显存:\\
+        \#define RADEON\_GEM\_DOMAIN\_CPU  \qquad\quad 0x1 \\
+        \#define RADEON\_GEM\_DOMAIN\_GTT  \qquad\quad 0x2 \\
+        \#define RADEON\_GEM\_DOMAIN\_VRAM \qquad      0x4 \\
+    RADEON\_GEM\_DOMAIN\_CPU暂不清楚是何用途，后面两个表示内存分别来自gtt 内存和vram。
+  \item[vram\_obj] bo指针，返回的bo结构体
+\end{description}
+14行，reserve（保留）bo，（表明当前bo已经被使用，不允许其他代码使用？？）。如果bo已经被reserve，那么这里的要等到bo被unreserve之后才能使用。（确认？？）
+17行，获取bo代表的显存的GPU虚拟地址，GPU将使用这个地址访问内存，后面我们让GPU访存的时候用的都是这类型的地址。
+23行，映射bo代表的显存空间，该函数的第二个参数返回映射后的虚拟地址，驱动将使用这个访问这片内存。
+29-47行代码和上面说的原理相同，不同的是这片内存来自GTT内存，在API函数内部处理的时候区别会比较大，但是使用API时只有只有显存类型这个参数不同。
+50-56行释放内存和bo结构。
+
+\subsubsection{用户空间}
+
+用户空间通过libdrm获取显存。下面这段代码显示了核外如何获取和使用显存：
+\begin{verbatim}
+  1     int ret;
+  2     struct kms_bo *bo;
+  3     unsigned bo_attribs[] = {
+  4         KMS_WIDTH,   0,
+  5         KMS_HEIGHT,  0,
+  6         KMS_BO_TYPE, KMS_BO_TYPE_SCANOUT_X8R8G8B8,
+  7         KMS_TERMINATE_PROP_LIST
+  8     };
+  9     bo_attribs[1] = width;
+ 10     bo_attribs[3] = height;
+ 11     ret = kms_bo_create(kms, bo_attribs, &bo);
+ 12     if (ret) {
+ 13         fprintf(stderr, "failed to alloc buffer: %s\n", strerror(-ret));
+ 14         return NULL;
+ 15     }
+ 16     ret = kms_bo_get_prop(bo, KMS_PITCH, stride);
+ 17     if (ret) {
+ 18         fprintf(stderr, "failed to retreive buffer stride: %s\n",  strerror(-ret));
+ 19         kms_bo_destroy(&bo);
+ 20         return NULL;
+ 21     }
+ 22     ret = kms_bo_map(bo, &virtual);
+ 23     if (ret) {
+ 24         fprintf(stderr, "failed to map buffer: %s\n", strerror(-ret));
+ 25         kms_bo_destroy(&bo);
+ 26         return NULL;
+ 27     }
+ 28     return bo;
+\end{verbatim}
+这段代码和内核中的代码很相似，读者根据调用的函数的函数名就应该能够理解其含义了。
+
+如果是radeon显卡页可以使用如下代码：
+\begin{verbatim}
+  1     struct radeon_bo *bo;
+  2
+  3     *stride =  width * 4;
+  4     bo = radeon_bo_open(bufmgr, 0, *stride * height, 1<<12UL,
+  5                     RADEON_GEM_DOMAIN_VRAM, 0);
+  6     if (bo == NULL) {
+  7         fprintf(stderr, "error open bo\n");
+  8         return NULL;
+  9     }
+ 10     radeon_bo_map(bo, 1);
+ 11     virtual = bo->ptr;
+ 12     return bo;
+\end{verbatim}
+【这些代码来自libdrm或者一个介绍libdrm的网站，本文档描述并不完整】
+
+
+
+
+\section{命令环机制}
+Radeon显卡使用命令环机制，命令环是GTT内存中分出来的一片内存，驱动程序往命令环中填充数据，填充完后通知GPU命令已经写入命令，GPU的命令处理器CP（Command Processor）开始执行命令。
+
+在前面的描述中我们即是通过ring环内存的使用来说明如何在系统中分配内存以及建立映射关系的。
+
+\subsection{命令处理器}
+【请根据我们当前的理解适当修改】
+
+命令处理器（Command Processor，CP）是面向图形控制器的可编程的专用计算引擎，
+主要是处理环形缓冲和间接线性缓冲的命令流，即获取和翻译PROMO4命令流。
+
+图形控制器中的CP主要完成以下任务：
+\begin{enumerate}
+  \item 接收驱动程序的命令流。驱动程序要么将命令流先写入系统内存，然后由CP通过总线主设备访问方式进行获取；要么就直接通过PCI设备访问方式将命令流写给CP。当前支持三种命令流：环形缓冲命令流、间接缓冲1命令流和间接缓冲2命令流。
+  \item 解析命令流，将解析后的数据传输给图形控制器的其他内部特征模块，内部特征模块包括3D图形处理器、2D图形处理器、视频处理器或者MPEG解码器。每时钟间隔内，数据传输可以是32位、64位、96位或者128位；其中64位、96位和128位数据传输必须在向量写模式下进行。而且，向量写模式只有在命令流处于拉模式下才有效。推模式下只能进行32位的数据传输。
+  \item CP内部有两通用DMA引擎，一个用于图形用户接口相关任务，一个专门用于视频采集任务。DMA引擎要求窗口源地址和目的地址都必须进行字节对齐。
+\end{enumerate}
+
+
+CP接受驱动程序的命令流有两种方式，对GPU的CP而言，称为“推模式”和“拉模式”。推模式就是可编程IO模式，即驱动程序通过PCI总线访问直接操作GPU；通过这种方式，驱动程序可以将寄存器写序列或命令包序列直接发送给GPU。
+
+\begin{enumerate}
+  \item 寄存器写序列。设置图形控制器的处理引擎状态，然后启动引擎。一般说来，通过某个寄存器的写可以触发引擎。这种情况常常用于调试。
+  \item 命令包序列。以压缩方式将命令信息传输给GPU；然后，GPU中的智能控制器将命令包转换成对其他处理引擎的寄存器写。
+\end{enumerate}
+
+在拉模式下，CPU先将命令信息写入系统主存；然后GPU使用总线主设备访问方式，读取系统主存。因此拉模式需要解决的重要问题是，CPU和GPU如何管理和访问系统主存中的共享缓冲。
+
+推模式的命令缓冲受限与GPU片上存储空间；而拉模式就不存在这样的限制。推模式在某些整体系统性能上也有自己的优点，例如访存带宽比较少。另外，实现GPU 片上命令缓冲溢出到帧缓冲技术，也可以缓解推模式的缓冲受限状况；但是，这也要求帧缓冲带宽能满足命令缓冲读写的需求。
+
+CP在推拉两种模式之间的切换必须谨慎处理。切换常常不能成功；一般说来，整机系统在复位过程就选择好了模式（拉模式会被程序员优先选择），在整个系统运行过程中不进行模式切换。
+
+在后面的代码中，我们使用的推模式主要是"寄存器写序列"，使用命令包的时候使用拉模式。【是否正确】
+
+\subsection{命令环缓冲区}
+在拉模式【？？】下，驱动程序在系统内存中为命令包申请一块缓冲区。GPU会根据这些命令包去执行屏幕绘图等操作。这种命令缓冲区按照环形方式进行管理，是CPU和GPU 共享的一片系统主存，CPU负责写入命令包，GPU负责读取和解析命令包。因为CPU和GPU 看到的环形缓冲区状态必须是一致性，所以CPU和GPU都要共同维护和管理环形缓冲区的状态：基地址、长度、写指针和读指针。为了使Ring Buffer能够正常工作，CPU和CPU 必须维护这种状态的一致性。Ring Buffer基地址和大小是在系统第一次启动时已经初始化好的，之后一般也不会改变。一个简单的工作是初始化这种状态的读指针和写指针的拷贝。另一方面，当操作Ring Buffer时， 读指针和写指针的修改非常频繁；为了维护环形缓冲区的状态一致性，当写操作者（CPU）更新写指针时，它必须发这个值给图像控制器写指针的读拷贝。同样的，当读操作者（GPU）更新读指针时，它必须发这个值给读指针的写拷贝。CPU填写命令包、递增写指针后将写指针内容发送给GPU；当GPU 抽取命令包、递增读指针后将读指针内容发送给CPU。无论是CPU还是GPU都是从低地址开始进行填写或抽取操作的，一旦到了环形缓冲区的结束处，又从环形缓冲区起始处继续；同时，GPU从队列头取CPU写入的命令包，一旦到达队列尾，又从头开始。
+见图\ref{ringbuffer}。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{ringbuffer}\\
+  \caption{命令环缓冲区控制图}\label{ringbuffer}
+\end{figure}
+
+
+\newcommand{\tabincell}[2]{\begin{tabular}{@{}#1@{}}#2\end{tabular}}
+\begin{table}[!h]%[hbp]
+\begin{tabular}{|c|p{6.5cm}|c|c|}
+\hline
+状态 & 说明 & 初始化值 & 运行状态变化 \\
+\hline
+基地址 & \tabincell{p{6cm}}{环形缓冲区起始地址，包括两种形式：\\ \quad 1）内核虚地址，供CPU 使用；\\ \quad 2）PCI地址，供GPU使用。}
+ & \multirow{2}{*}{申请缓冲区时就固定了} & \multirow{2}{*}{不变} \\
+ \cline{1-2}
+% \hline
+长度 & 环形缓冲区长度 &  & \\
+\hline
+写指针 & CPU将要写入的单元索引 & \multirow{2}{*}{零} & \multirow{2}{*}{递增变化} \\
+\cline{1-2}
+%\hline
+读指针 & GPU正在读取的单元索引 & & \\
+\hline
+\end{tabular}
+\caption{命令环缓冲区相关状态}\label{ringbufferstate}
+\end{table}
+
+表\ref{ringbufferstate}显示了相关状态的变化情况。
+
+\subsection{间接缓冲区}
+
+在系统主存中，除了环形缓冲区之外，CP还可以从间接缓冲1和间接缓冲2中获取命令包。这个过程是这样完成的：在主命令流中（ring buffer）有一个设置CP的间接缓冲1地址和大小的寄存器。写间接缓冲1的寄存器触发CP从提供的地址取新的命令流。从主命令流解析最后一个命令包来设置间接缓冲1地址和大小的寄存器；然后CP开始从间接缓冲1中取数据。间接缓冲1的数据流可能要设置CP的间接缓冲2地址和大小的寄存器。和之前的过程一样，写间接缓冲1大小的寄存器触发CP从提供的地址中获取新的命令流。从间接缓冲1流中解析最后一个包来设置间接缓冲2地址和大小的寄存器。CP从间接缓冲2取一定数量的数据一直到间接缓冲末尾；然后从间接缓冲1返回它的命令包解析。CP从间接缓冲1中取数据一直到间接缓冲1的末尾，然后从主命流（ring buffer）返回它的命令包解析。【请适当修改本段后后面内容保证用词统一】
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.6]{indirectbuffer}\\
+  \caption{间接缓冲区运行过程}\label{indirectbuffer}
+\end{figure}
+
+图\ref{indirectbuffer}显示了两个场景，场景（1）是ring环执行过程中碰到了运行indirect buffer 1 的指令，于是CP取indirect buffer 1中的命令运行，运行完了之后跳回到ring buffer 中。场景（2）显示了在indirect buffer 1运行的过程中还碰到了跳转到indirect buffer 2的指令，因而CP跳转到indirect buffer 2中执行指令，执行完成后跳回到indirect buffer 1中。
+
+这个过程有点类似函数调用。程序在运行过程中遇到函数调用，则会使用跳转指令跳到被调用函数入口，执行完函数后跳回到原来的程序位置继续执行。
+
+\subsection{内核命令环缓冲区机制的实现}
+
+在Linux内核radeon驱动中有一个ring test过程用于验证ring buffer可以正常运行，如果ring test通过，那么GPU和CPU交互的部分已经配置正确，可以正常工作了。
+
+Ring buffer机制几乎在所有类型的芯片上都是一样的，区别只是r600以后的芯片ring buffer GPU端读写指针的寄存器地址发生了变化。因而Linux内核驱动针对不同GPU核实现ring buffer机制以及ring test过程的代码几乎是完全相同的。
+
+\begin{verbatim}
+  2287 int r600_ring_test(struct radeon_device *rdev)
+2288 {
+2289     uint32_t scratch;
+2290     uint32_t tmp = 0;
+2291     unsigned i;
+2292     int r;
+2293
+2294     r = radeon_scratch_get(rdev, &scratch);
+2295     if (r) {
+2296         DRM_ERROR("radeon: cp failed to get scratch reg (%d).\n", r);
+2297         return r;
+2298     }
+2299     WREG32(scratch, 0xCAFEDEAD);
+2300     r = radeon_ring_lock(rdev, 3);
+2301     if (r) {
+2302         DRM_ERROR("radeon: cp failed to lock ring (%d).\n", r);
+2303         radeon_scratch_free(rdev, scratch);
+2304         return r;
+2305     }
+2306     radeon_ring_write(rdev, PACKET3(PACKET3_SET_CONFIG_REG, 1));
+2307     radeon_ring_write(rdev, ((scratch - PACKET3_SET_CONFIG_REG_OFFSET) >> 2));
+2308     radeon_ring_write(rdev, 0xDEADBEEF);
+2309     radeon_ring_unlock_commit(rdev);
+2310     for (i = 0; i < rdev->usec_timeout; i++) {
+2311         tmp = RREG32(scratch);
+2312         if (tmp == 0xDEADBEEF)
+2313             break;
+2314         DRM_UDELAY(1);
+2315     }
+2316     if (i < rdev->usec_timeout) {
+2317         DRM_INFO("ring test succeeded in %d usecs\n", i);
+2318     } else {
+2319         DRM_ERROR("radeon: ring test failed (scratch(0x%04X)=0x%08X)\n",
+2320               scratch, tmp);
+2321         r = -EINVAL;
+2322     }
+2323     radeon_scratch_free(rdev, scratch);
+2324     return r;
+2325 }
+\end{verbatim}
+
+以上代码显示了r600及其以上GPU核内核驱动做ring test的代码。
+
+2294行获取一个可用的scratch寄存器，scratch寄存器是功能未定义的寄存器，由（驱动）软件定义其功能。
+
+2299行使用mmio的方式直接向寄存器中写入值“0xCAFEDEAD”，此时该scratch寄存器的内容为0xCAFEDEAD。
+
+2300行向内核驱动中的ring buffer机制申请3个dword（gpu命令都是以4字节为单位计的），同时由于会有多个程序并发访问ring buffer，这里还会对ring buffer加锁。
+
+2306-2308行代码向刚才申请到的ring buffer内存中写入3个dword的命令，关于GPU命令在下一章会详细介绍，这里的命令的意思是向刚才的scratch寄存器中写入值“0xDEADBEEF”。
+
+2309行提交命令，上面三行代码写的命令写入ring buffer后并不会被执行，直到调用radeon\_ring\_unlock\_commit之后命令才会被执行。
+2310-2314行是一个通过轮询的方式检查scratch寄存器的过程，如果上面的命令正常运行，那么scratch寄存器的值将会是“0xDEADBEEF”，否则命令没有正常运行，ring test 失败。
+
+总结上面的过程，在radeon内核驱动使用了下面三个函数就可以操作ring buffer:
+
+\begin{table}[!h]%[hbp]
+\begin{tabular}{|c|p{6cm}|c|}
+  \hline
+  % after \\: \hline or \cline{col1-col2} \cline{col3-col4} ...
+  API函数 & 功能 & 参数 \\
+  \hline
+  radeon\_ring\_lock & 申请ring buffer内存并锁住ring buffer，如果ring buffer 被用完，则更新CPU端的读指针 & N为申请的dwords数目 \\
+  \hline
+  radeon\_ring\_write & 向ring buffer写入命令和命令参数，这里只更新CPU端的写指针 &  \\
+  \hline
+  radeon\_ring\_unlock\_commit & 更新GPU端的写指针，释放ring buffer锁 &  \\
+  \hline
+\end{tabular}
+\end{table}
+
+
+需要提及的是scratch寄存器，scratch寄存器是GPU预留给软件使用的寄存器，r300以前的显卡只5个scratch寄存器，其后的显卡有7个寄存器，GPU本身并不依赖这些寄存器对其进行编程，软件可以自定义其功能。上面这段代码仅仅用于验证命令是否正确执行，然而后面的轮询过程却对我们有所启发：软件发送了命令之后什么时候直到命令被执行完成了？可以按照这里面的做法，在命令尾部再添加一条写scratch寄存器的命令（当然必须保证往scratch寄存器写入的值和scratch寄存器原来的值不一样），而后轮询该scratch寄存器，如果这个寄存器被写入了我们要求其写入的值，那么就可以确定命令已经执行完了。这里实际上定义了一个软硬件同步的机制，后面中断机制的章节会讨论驱动中fence机制的实现，fence机制是使用中断实现的，但是那里面使用了我们上面提到的思想。
+
+
+Ring buffer机制的实现涉及到上表中的3个函数。为了简化，下面使用我们自己的代码来说明ring buffer机制的实现，我们自己的代码简化了许多内容。
+
+\begin{verbatim}
+1120 int radeon_ring_lock(struct radeon_device *rdev, unsigned ndw)
+1121 {
+1122     int r;
+1126     r = radeon_ring_alloc(rdev, ndw);
+1133     return r;
+1134 }
+
+1099 int radeon_ring_alloc(struct radeon_device *rdev, unsigned ndw)
+1100 {
+1101     ndw = (ndw + rdev->cp_align_mask) & ~rdev->cp_align_mask;
+1102     while (ndw > (rdev->cp_ring_free_dw - 1)) {
+1103         radeon_ring_free_size(rdev); /* get the free size */
+1104         if (ndw < rdev->cp_ring_free_dw) {
+1105             break;
+1106         }
+1112     }
+1113     rdev->cp_count_dw = ndw;
+1117     return 0;
+1118 }
+
+1074 void radeon_ring_free_size(struct radeon_device *rdev)
+1075 {
+1076     /* if we have enabled writeback buffer */
+1077     /* rdev->cp_rptr = le32_to_cpu(rdev->wb[RADEON_WB_CP_RPTR_OFFSET/4]);*/
+1078     if(rdev->family >= CHIP_R600) {
+1079         rdev->cp_rptr = mmio_read(R600_CP_RB_RPTR);
+1080     }
+1081     else {
+1082         rdev->cp_rptr = mmio_read(RADEON_CP_RB_RPTR);
+1083     }
+1084     // now all the packets cost very small mem and will not come here
+1085     rdev->cp_ring_free_dw = (rdev->cp_rptr + (rdev->cp_ring_size / 4));
+1086     rdev->cp_ring_free_dw -= rdev->cp_wptr;
+1087     rdev->cp_ring_free_dw &= rdev->cp_ptr_mask;
+1088     if (!rdev->cp_ring_free_dw) {
+1089         rdev->cp_ring_free_dw = rdev->cp_ring_size / 4;
+1090     }
+1091 }
+\end{verbatim}
+
+ndw是需要申请的大小，CP处理命令的时候有对其要求，当前radeon驱动中都是要求16 个ndw对其的，1101行根据对其要求调整ndw。rdev->cp\_ring\_free\_dw记录了ring buffer中剩余的空间大小，如果空间不够了，调用radeon\_ring\_free\_size查询GPU的读指针，并更新CPU的读指针（1077/1079/1082），直到有足够空间为止。
+
+每一次命令执行完成后，CPU并不会去查询GPU读指针以及更新CPU的读指针，而是等到ring buffer没有空间之后才会查询，这样查询GPU读指针的频率就比较低了。
+
+注意到1077行是使用了write back buffer的情况，write back buffer的原理是：可以将寄存器“对应“到某个内存地址上，GPU将不再写寄存器而是写到指定的内存中，驱动将读写这个内存地址而不是原来的寄存器。我们的代码中没有使用write back buffer。
+
+
+\begin{verbatim}
+1132 static inline
+1133 void radeon_ring_write( struct radeon_device *rdev, uint32_t v) // write struct rdev
+1134 {
+1135     rdev->cp_ring[rdev->cp_wptr++] = v;
+1136     rdev->cp_wptr &= rdev->cp_ptr_mask;
+1137     rdev->cp_count_dw--;/* in radeon driver it is used for debug */
+1138     rdev->cp_ring_free_dw--;
+1139 }
+\end{verbatim}
+
+1135行向当前ring buffer位置写入命令或者命令参数。
+1138行更新剩余的ring buffer空间。
+
+
+\begin{verbatim}
+1142 void radeon_ring_unlock_commit(struct radeon_device *rdev)
+1143 {
+1144     unsigned count_dw_pad;
+1145     unsigned i;
+1146
+1147         /* We pad to match fetch size */
+1148     count_dw_pad = (rdev->cp_align_mask + 1) -
+1149                        (rdev->cp_wptr & rdev->cp_align_mask);
+1150     for (i = 0; i < count_dw_pad; i++) {
+1151         radeon_ring_write(rdev,  2 << 30);
+1152     }
+1153     mb();
+1154     if(rdev->family == CHIP_RS780) {  // notice
+1155         mmio_write(CP_RB_WPTR, rdev->cp_wptr);
+1156         (void)mmio_read(CP_RB_WPTR);
+1157     }
+1158     if(rdev->family == CHIP_R580) {
+1159         mmio_write(RADEON_CP_RB_WPTR, rdev->cp_wptr);
+1160         (void)mmio_read(RADEON_CP_RB_WPTR);
+1161     }
+1162 }
+\end{verbatim}
+
+发送命令，每一次发送的gpu命令及参数数目都必须是对齐的，在radeon\_ring\_alloc 函数分配内存的时候是对齐的，但是填充完命令的时候，由于这些对齐的地方保存有ring buffer回绕之前的内容，必须把这些内容清空才不会导致GPU运行命令出错。1151 行使用2型命令包填充这些对齐位置的内存（GPU命令包章节将详细讨论命令包格式）。1154-1161行更新GPU写指针（更新写指针后读该寄存器保证内容已经写入该寄存器）更新写指针后GPU将开始执行命令。
+
+\subsection{内核间接缓冲区机制的实现}
+
+Linux内核中完成ring test后，会有一个indirect buffer test过程。这个过程和ring test过程完成的操作一样，写scratch寄存器。
+
+\begin{verbatim}
+2660 int r600_ib_test(struct radeon_device *rdev)
+2661 {
+2662     struct radeon_ib *ib;
+2663     uint32_t scratch;
+2664     uint32_t tmp = 0;
+2665     unsigned i;
+2666     int r;
+2667
+2668     r = radeon_scratch_get(rdev, &scratch);
+......
+2673     WREG32(scratch, 0xCAFEDEAD);
+2674     r = radeon_ib_get(rdev, &ib);
+......
+2679     ib->ptr[0] = PACKET3(PACKET3_SET_CONFIG_REG, 1);
+2680     ib->ptr[1] = ((scratch - PACKET3_SET_CONFIG_REG_OFFSET) >> 2);
+2681     ib->ptr[2] = 0xDEADBEEF;
+2682     ib->ptr[3] = PACKET2(0);
+2683     ib->ptr[4] = PACKET2(0);
+2684     ib->ptr[5] = PACKET2(0);
+2685     ib->ptr[6] = PACKET2(0);
+2686     ib->ptr[7] = PACKET2(0);
+2687     ib->ptr[8] = PACKET2(0);
+2688     ib->ptr[9] = PACKET2(0);
+2689     ib->ptr[10] = PACKET2(0);
+2690     ib->ptr[11] = PACKET2(0);
+2691     ib->ptr[12] = PACKET2(0);
+2692     ib->ptr[13] = PACKET2(0);
+2693     ib->ptr[14] = PACKET2(0);
+2694     ib->ptr[15] = PACKET2(0);
+2695     ib->length_dw = 16;
+2696     r = radeon_ib_schedule(rdev, ib);
+......
+2703     r = radeon_fence_wait(ib->fence, false);
+......
+2708     for (i = 0; i < rdev->usec_timeout; i++) {
+2709         tmp = RREG32(scratch);
+2710         if (tmp == 0xDEADBEEF)
+2711             break;
+2712         DRM_UDELAY(1);
+2713     }
+.....
+2721     radeon_scratch_free(rdev, scratch);
+2722     radeon_ib_free(rdev, &ib);
+2723     return r;
+2724 }
+\end{verbatim}
+
+2668-2673行的内容和ring test的过程一样。
+2674行从系统中获取一个indirect buffer，ib->ptr中记录了indirect buffer在内存中的位置。
+2679-2694向indirect buffer中填充命令和参数，这里填写的命令和参数与ring test 中填写的命令和参数是相同的，当然这里也有对齐要求。
+2696 行将填写好的indirect buffer添加到调度队列中。
+2703行涉及fence机制，在中断机制一节中我们将详细介绍。
+
+
+
+仍然使用我们简化后的演示代码来说明indirect buffer机制的实现。
+\begin{verbatim}
+1962 int gpu_ib_pool_init (struct radeon_device *rdev)
+1963 {
+1964     uint32_t tmp_addr;
+1965     struct page *cpu_page;
+1966     dma_addr_t dma_addr;
+1967     dma_addr_t tmp_dma_addr;
+1968     int j, i;
+1969     int size = rdev->zone[IB_ZONE].size;
+1970     struct pci_dev *pdev = rdev->pdev;
+1971
+1972     rdev->ib_gpu_addr = rdev->zone[IB_ZONE].gpu;
+1973     cpu_page = alloc_pages(GFP_DMA32|GFP_KERNEL|__GFP_ZERO,
+1974                 get_order(size));
+1975
+......
+1980     rdev->ib = phys_to_virt(page_to_phys(cpu_page));
+1981
+1982     dma_addr = pci_map_page(pdev, cpu_page, 0, size,
+1983                 PCI_DMA_BIDIRECTIONAL);
+......
+1988     rdev->ib_dma_addr = dma_addr;
+1989     tmp_addr = rdev->zone[IB_ZONE].gpu;
+......
+2005     for (i = 0; i < IB_POOL_SIZE; i++) {
+2006         unsigned offset;
+2007         offset = i * 64 * 1024;
+2008         rdev->ib_pool[i].gpu_addr = rdev->ib_gpu_addr + offset;
+2009         rdev->ib_pool[i].ptr = (uint32_t*)((void*)rdev->ib + offset);
+2010         rdev->ib_pool[i].dma_addr = rdev->ib_dma_addr + offset;
+2011         rdev->ib_pool[i].free = true;
+2012         rdev->ib_pool[i].length_dw = 0x0;
+2013         rdev->ib_pool[i].idx = i;
+2014     }
+2015     return 0;
+2023 }
+\end{verbatim}
+Indirect buffer位于GTT内存中，其内存的分配和页表建立过程和第2章内容的ring buffer分配过程相同。和linux内核radeon驱动一样，这里我们给出了IB\_POOL\_SIZE（16）个indirect buffer，这些buffer是在一块连续的物理内存上分割出来的，2005-2014行设置号地址将这些indirect buffer添加到ib\_pool中。
+
+演示代码中的gpu\_ib\_get从ib\_pool的16个indirect buffer中选出一个可用的buffer，在实际的linux内核代码中gpu\_ib\_get还涉及fence事件和互斥操作。
+
+\begin{verbatim}
+1582 int radeon_ib_schedule(struct radeon_devie *rdev, struct radeon_ib *ib)
+1583 {
+1584     int r = 0;
+1585     if (ib->length_dw == 0) {
+1586         printk(KERN_ERR "[%s %d] couldn't schedule IB\n", __func__, __LINE__);
+1587         return -EINVAL;
+1588     }
+1589     /* 64 bits is enough */
+1590     r = radeon_ring_lock(64);
+1591     if(r){
+1592         printk(KERN_ERR "[%s %d] allocate ring buffer error\n",
+1593             __func__, __LINE__);
+1594     }
+1595     radeon_ring_ib_execute(rdev, ib);
+1596     // we do not have fence and ib will not protected by fence
+1597     // so we do not set ib free here and will free late
+1598     //radeon_fence_emit(rdev, ib->fence);
+1599     //ib->free = true;
+1600     radeon_ring_commit(rdev);
+1601     return 0;
+1602 }
+
+2189 void radeon_ring_ib_execute(struct radeon_device *rdev, struct radeon_ib *ib)
+2190 {
+2191     radeon_ring_write(rdev, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
+2192     radeon_ring_write(rdev, ib->gpu_addr & 0xFFFFFFFC);
+2193     radeon_ring_write(rdev, upper_32_bits(ib->gpu_addr) & 0xFF);
+2194     radeon_ring_write(rdev, ib->length_dw);
+2195 }
+\end{verbatim}
+
+Indirect buffer要能够正常运行，必须将其插入到ring buffer的代码中去，这就类似在汇编代码中插入"call xx"指令进行函数调用一样。radeon\_ring\_ib\_execute函数添加的命令就相当于函数调用时使用的call指令。
+在后面介绍了GPU命令包后读者就能够明白这段代码了。每个indirect buffer的地址和大小都是在初始化的时候固定的，但是通常往indirect buffer中填写的内容的长度是不确定的，在使用的时候必须同时告诉indirect buffer的地址和当前使用的长度（2192-2194行）。
+调用radeon\_ring\_commit之后，ring buffer的内容开始执行，此时执行到indirect buffer指令后进入indirect buffer中的指令执行，这就是图\ref{indirectbuffer}显示的场景1。
+
+
+
+\section{Radeon GPU命令包}
+
+命令换缓冲区一节介绍了GPU的命令环机制，在命令环机制下，可以使用推模式和拉模式两种方式实现对GPU的编程。本章我们介绍使用命令包的拉模式对GPU进行编程。
+
+\subsection{PM4命令包格式}
+
+radeon显卡可以运行在PM4模式下，在这种模式下，不需要直接向寄存器中写数据执行绘图操作，而是在系统内存中准备PM4格式的命令包并让硬件（显卡的微引擎）执行绘图命令。
+
+1型当前定义了4中命令包，分别是0型/1型/2型和3型命令包，命令包由两部分组成，第一部分是命令包头，第二部分是命令包主体，命令包头为请求GPU执行的具体操作，命令主体为执行该操作需要的数据。
+
+【本节内容参卡R5xx Acceleration v1.5.pdf 29-33页内容 R600的命令包格式是一样的，此处加以说明】
+
+\noindent \textbf{1）0型命令包}
+
+0型命令包用于写连续N个寄存器。
+
+包主体部分是依次往这些寄存器写的值。包头各个部分的意义为：
+\begin{table}[!h]
+\begin{tabular}{|l|l|p{10cm}|}
+  \hline
+  % after \\: \hline or \cline{col1-col2} \cline{col3-col4} ...
+  Bits & Field name & Description \\
+  \hline
+  12:0 & BASE\_INDEX & 要写的连续寄存器的第一个寄存器地址，最大地址0x7FFF \\
+  \hline
+  14:13 & Reserved & 保留位 \\
+  \hline
+  15 & ONE\_REG\_WR & \tabincell{l}{0表示将包主体的数据依次写入寄存器中 \\
+  1表示所有数据写入同一个寄存器} \\
+  \hline
+  29:16 & COUNT & 要写的寄存器数目N-1 \\
+  \hline
+  31:30 & TYPE & 0型包包类型为0 \\
+
+  \hline
+\end{tabular}
+\end{table}
+
+
+
+\noindent \textbf{1）1型命令包}
+
+1型命令包用于写两个寄存器，部分寄存器使命令无法访问到，这个时候需要使用0型命令。【什么地方这样说的】
+
+1型命令包主体为分别向包头定义的两个寄存器写入的值。1型命令包包头定义如下：
+
+\begin{table}[!h]
+\begin{tabular}{|l|l|p{10cm}|}
+  \hline
+  % after \\: \hline or \cline{col1-col2} \cline{col3-col4} ...
+  Bits & Field name & Description \\
+  \hline
+  10:0 &  REG\_INDEX1 & 第一个寄存器地址 \\
+  \hline
+  21:11 & REG\_INDEX2 & 第二个寄存器地址\\
+  \hline
+  29:22 & Reserved & 保留位 \\
+  \hline
+  31:30 & TYPE & 1型包包类型为0x1 \\
+  \hline
+\end{tabular}
+\end{table}
+
+\noindent \textbf{1）2型命令包}
+2型命令包是一个空命令包，用于填充对齐命令。2型命令包没有包主体，其包头最高两位为0x2，其它位无意义。
+
+\noindent \textbf{1）3型命令包}
+3型命令包是最功能最丰富的包，主要执行绘图命令，图形的主要功能都是通过这个包实现的。
+
+3型命令包主体的内容由包头的IT\_OPCODE决定。
+\begin{table}[!h]
+\begin{tabular}{|l|l|p{10cm}|}
+  \hline
+  % after \\: \hline or \cline{col1-col2} \cline{col3-col4} ...
+  Bits & Field name & Description \\
+  \hline
+  7:0 &  Reserved & 未定义 \\
+  \hline
+  15:8 & IT\_OPCODE & 操作码\\
+  \hline
+  29:16 & COUNT & 包主体dwords数目N-1 \\
+  \hline
+  31:30 & TYPE & 1型包包类型为0x1 \\
+  \hline
+\end{tabular}
+\end{table}
+
+\subsection{命令包使用实例}
+\noindent  \textbf{1）0型命令包}
+Linux内核代码./drivers/gpu/drm/radeon/r600.c r600\_fence\_ring\_emit函数有如下语句：
+\begin{verbatim}
+radeon_ring_write(rdev, PACKET0(CP_INT_STATUS, 0));
+radeon_ring_write(rdev, RB_INT_STAT);
+\end{verbatim}
+PACKET0定义如下：
+\begin{verbatim}
+#define PACKET0(reg, n) ((PACKET_TYPE0 << 30) |  \     包类型 0型命令包
+             (((reg) >> 2) & 0xFFFF) |          \        寄存器偏移基地址
+             ((n) & 0x3FFF) << 16)                     要写的寄存器数目
+\end{verbatim}
+
+所有类型的数据包31~30bit为包类型标识符，0型数据包的类型标识符为0,其30bit为PACKET\_TYPE0（0x0）,29~16bit为命令写的寄存器数量-1（(n) \& 0x3FFF) << 16），上面例子只写一个寄存器，其值为0。第14~132bit为保留位，12~0bit ((reg) >> 2) \& 0xFFFF)为第一个寄存器偏移地址，由于使用0型包可以访问的所有寄存器都是4字节的，寄存器地址都是4字节对其的，所以低2位为0。
+
+
+\noindent  \textbf{2）1型命令包}
+由于1型数据包可以用0型数据包代替而且1型数据包并不能够访问到所有寄存器，在linux-2.6.32.20的内核radeon驱动中并没有使用1型命令包。
+
+\noindent  \textbf{3）2型命令包}
+2型命令包不做任何操作，仅用于填充用，填充ring buffer的时候有对齐要求，2.6.32.20内核radeon驱动对齐要求是16个dword（16×4字节），在命令没有16 dword对齐的时候，就需要使用2型命令包填充。
+
+drivers/gpu/drm/radeon/radeon\_ring.c radeon\_ring\_commit函数用于通知GPU从ring buffer中取数据并执行，该函数包含如下代码：
+
+\begin{verbatim}
+count_dw_pad = (rdev->cp.align_mask + 1) - (rdev->cp.wptr & rdev->cp.align_mask);
+for (i = 0; i < count_dw_pad; i++) {
+    radeon_ring_write(rdev, 2 << 30);
+}
+\end{verbatim}
+
+第一句用于计算对齐命令需要的dword数目，后面的for循环用于填充2型命令。2型命令仅有个命令头部，并且只有31~30bit有效。
+
+\noindent  \textbf{4）3型命令包}
+3型命令是主要的命令包，涵盖了寄存器设置/绘图命令/同步等主要操作。
+以下是一个使用3型命令包设置寄存器的例子，这段代码来自drivers/gpu/drm/radeon/r600.c 的r600\_ib\_test函数：
+\begin{verbatim}
+ib->ptr[0] = PACKET3(PACKET3_SET_CONFIG_REG, 1);
+ib->ptr[1] = ((scratch - PACKET3_SET_CONFIG_REG_OFFSET) >> 2);
+ib->ptr[2] = 0xDEADBEEF;
+ib->ptr[3] = PACKET2(0);
+ib->ptr[4] = PACKET2(0);
+......
+ib->ptr[15] = PACKET2(0);
+ib->length_dw = 16;
+\end{verbatim}
+
+这段代码使用了indirect buffer，但是填充的命令和ring buffer中填充的命令是一样的。
+\begin{verbatim}
+#define PACKET3(op, n)  ((PACKET_TYPE3 << 30) |             \
+(((op) & 0xFF) << 8) |             \
+((n) & 0x3FFF) << 16)
+\end{verbatim}
+
+3型命令头部包含了操作码op和数据数目（以dword计）。上面例子中PACKET3(PACKET3\_SET\_CONFIG\_REG, 1) PACKET3\_SET\_CONFIG\_REG表明这次命令包用于设置寄存器，1表明后面有2个dword数据，分别是(scratch - PACKET3\_SET\_CONFIG\_REG\_OFFSET) >> 2（寄存器地址）和0xDEADBEEF（往寄存器中写的值）。后面是用于对齐用的2型包。
+
+上面的代码用于写scratch寄存器，scratch在后面的事件处理机制起着很重要的作用。
+
+
+下面使用一个更加复杂的命令包来说明3型包的使用，下面的这个命令包用于执行一个简单的2D操作。r600显卡是ATI推出的第一款使用统一着色器的GPU，r600及其以后的显卡不包含单独的2D单元，而是使用3D部件执行2D操作。为了简单起见，这里我们使用r500显卡上的填充矩形的命令包。
+
+\begin{verbatim}
+radeon_ring_write(rdev, PACKET3(PACKET3_PAINT_MULTI, 6));
+radeon_ring_write(rdev,
+RADEON_GMC_DST_PITCH_OFFSET_CNTL |
+RADEON_GMC_DST_CLIPPING | // important
+RADEON_GMC_BRUSH_SOLID_COLOR |          // 13 << 4
+(RADEON_COLOR_FORMAT_ARGB8888 << 8) |     // << 8
+RADEON_GMC_SRC_DATATYPE_COLOR |         // 4 << 12
+RADEON_ROP3_P |                              // << 16
+RADEON_GMC_CLR_CMP_CNTL_DIS);           // 1 << 28
+radeon_ring_write(rdev, ((pitch / 64) << 22) | (fb_offset>>10));
+radeon_ring_write(rdev, 0 | (0 << 16)); 					// SC_TOP_LEFT
+radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16)); 	// SC_BOT_RITE
+radeon_ring_write(rdev, color); // this is color
+radeon_ring_write(rdev, (x << 16) | y);
+radeon_ring_write(rdev, (w << 16) | h);
+radeon_ring_write(rdev, PACKET0(RADEON_DSTCACHE_CTLSTAT, 0));
+radeon_ring_write(rdev, RADEON_RB2D_DC_FLUSH_ALL);
+radeon_ring_write(rdev, PACKET0(RADEON_WAIT_UNTIL, 0));
+radeon_ring_write(rdev, RADEON_WAIT_2D_IDLECLEAN|
+RADEON_WAIT_HOST_IDLECLEAN|
+RADEON_WAIT_DMA_GUI_IDLE);
+\end{verbatim}
+
+3型包根据他们IT\_OPCODE的不同，其IT\_BODY差别很大，如果IT\_OPCODE的最高位为1（通常是2D绘图命令），那么PACKET还需要加入GUI control。R500上的2D绘图命令有如下格式：
+\begin{verbatim}
+HEADER
+GUI_CONTROL
+SETUP_BODY
+DATA_BLOCK
+\end{verbatim}
+
+其中Header部分对应3型命令包的头，GUI\_CONTROL/SETUP\_BODY共同构成了当前绘图环境的配置，这两部分加上DATA\_BLOCK共同构成了3型包的IT\_BODY部分。
+上面的代码第一句表明该命令包执行的是矩形绘制（PAINT\_MULTI可以同时绘制多个矩形，这里我们只绘制了一个矩形）。
+
+第二句对应GUI\_CONTROL，GUI\_CONTROL为32bit，内容为当前绘制环境的标志，下表给出了代码中使用的一些标志（如果是blit操作，除了表中的DSTxx参数外，还需要设置对应的SRCxx参数），关于这些标志更详细的信息可以参考“R5xx Acceleration v1.5.pdf”35-36页相关内容。
+
+\begin{table}[!hbp]
+\begin{tabular}{|l|l|p{10cm}|}
+\hline
+\hline
+Bit & Field name & Description \\
+\hline
+1 & DST\_PITCH\_OFFSET & 绘图目标区域的PITCH值和该区域在GPU虚拟地址空间中的偏移，如果该为被置为1,则需要在SETUP\_BODY中指定该参数。 \\
+\hline
+3 & DST\_CLIPPING & 设置绘图区域的裁剪参数，如果该位置为1,则需要在SETUP\_BODY 中设置SC\_TOP\_LEFT和SC\_BOTTOM\_RIGHT参数。  \\
+\hline
+7:4 & BRUSH\_TYPE & 绘图时使用的brush类型，brush类型需要根据这里给出的类型在SETUP\_BODY中填brush包，不同的BRUSH\_TYPE对应的brush包不同。 \\
+\hline
+11:8 & DST\_TYPE &  \tabincell{p{10cm}}{绘图目标区域的像素类型: \\
+1 : (reserved) \\
+2 : 8 bpp pseudocolor \\
+3 : 16 bpp aRGB 1555 \\
+4 : 16 bpp RGB 565 \\
+5 : reserved \\
+6 : 32 bpp aRGB 8888 \\
+7 : 8 bpp RGB 332 \\
+8 : Y8 greyscale \\
+9 : RGB8 greyscale (8 bit intensity, duplicated for all 3 channels. Green channel is used on writes) \\
+10 : (reserved) \\
+11 : YUV 422 packed (VYUY) \\
+12 : YUV 422 packed (YVYU) \\
+13 : (reserved)}  \\
+\hline
+\end{tabular}
+\caption{GUI\_CONTROL部分位意义}
+\end{table}
+
+在上面示例程序中，以上标志位均被设置，并且BRUSH\_TYPE被设置为14，DST\_TYPE设为32位真彩色。
+根据GUI\_CONTROL的设置，SETUP\_BODY中需要设置以下参数：
+\begin{verbatim}
+DST_PITCH_OFFSET
+SC_TOP_LEFT
+SC_BOTTOM_RIGHT
+BRUSH_PACKET
+\end{verbatim}
+上面代码中的3-6行即是对这些参数的设置。
+更多参数的可以参考“R5xx Acceleration v1.5.pdf” 37页的内容。
+下面对这些参数进行介绍：\\
+\noindent \textbf{DST\_PITCH\_OFFSET}
+
+包括了三部分，31:30位是和tiling相关的标志位，29：22位是以64字节为单位的pitch值，21：0位是DST绘图区域（在xorg中称为pixmap）以1KB为单位在显存中的偏移，这里提示我们，在分配内存的时候必须是1K对齐的，否则在使用的时候会出问题，后面讨论directfb的时候将会碰到这个问题。对于这个参数，上面代码填的是
+\begin{verbatim}
+radeon_ring_write(rdev, ((pitch / 64) << 22) | (fb_offset>>10));
+\end{verbatim}
+
+\noindent \textbf{SC\_TOP\_LEFT \\
+SC\_BOTTOM\_RIGHT}
+
+指定绘图区域的裁剪区域，裁剪区域是个矩形，SC\_TOP\_LEFT指定裁剪区域左上方坐标，2D绘图时以屏幕左上方的点为原点，从左往又为X轴正方向，从上往下为Y轴正方向。
+\begin{verbatim}
+radeon_ring_write(rdev, 0 | (0 << 16)); 				// SC_TOP_LEFT
+radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16)); // SC_BOTTOM_RIGHT
+\end{verbatim}
+fb\_w和fb\_h为当前绘图区域的长和宽，这里我们指定的裁剪区域就是整个绘图区域。
+
+\noindent \textbf{BRUSH\_PACKET}
+
+在GUI\_CONTROL中指定的brush type为RADEON\_GMC\_BRUSH\_SOLID\_COLOR,关于brush type 和对应的值请参考“R5xx Acceleration v1.5.pdf”38页的内容，这里指定的类型为13，对应的BRUSH\_PACKET格式为4字节，内容为绘图使用的前景色。
+\begin{verbatim}
+radeon_ring_write(rdev, color); // the foreground color
+\end{verbatim}
+
+后面两句代码是DATA\_BLOCK部分，对应绘图使用的参数。
+\begin{verbatim}
+radeon_ring_write(rdev, (x << 16) | y);// 矩形左上角坐标
+radeon_ring_write(rdev, (w << 16) | h);// 矩形宽和高
+\end{verbatim}
+
+PAINT\_MULTI命令包的DATA\_BLOCK部分定义如下表示：
+\begin{table}[!hbp]
+\begin{tabular}{|l|l|p{10cm}}
+\hline
+Ordinal & Field name & Description \\
+\hline
+1 & [DST\_X1 | DST\_Y1] & 第1个矩形左上角的坐标，高16为X轴坐标，低16位为Y轴坐标 \\
+\hline
+1 & [DST\_W1 | DST\_H1] & 第1个矩形的宽和高 \\
+\hline
+... & & \\
+\hline
+2n-1 & [DST\_Xn | DST\_Yn] & 第n个矩形左上角的坐标 \\
+2n & [DST\_Wn | DST\_Hn] & 第n个矩形的宽和高 \\
+\hline
+\end{tabular}
+\caption{PAINT\_MULTI的DATA\_BLOCK}
+\end{table}
+
+
+
+\subsection{R500显卡使用命令包实现2D加速}
+
+下面给出了一些代码，读者根据前面的介绍并参考“R5xx Acceleration v1.5.pdf” 是很容易理解的，将这些代码添加到drivers/gpu/drm/radeon/radeon\_test.c文件中并调用这些函数，在开启radeon\_testing的情况下就能在启动阶段看到效果。
+
+\noindent \textbf{画线}
+
+POLYLINE的op\_code为0x95，用于绘制折线,其3型命令包数据块部分见下表：
+\begin{table}[!hbp]
+\begin{tabular}{|l|l|p{10cm}|}
+\hline
+Ordinal & Field name & Description \\
+\hline
+1 & [Y0 | X0 ] & 折线的起始点坐标，X0为低16位表示X轴坐标，Y0为高16位表示Y轴坐标。 \\
+\hline
+2 & [Y1 | X1] & 第二个点的坐标 \\
+\hline
+... & & \\
+\hline
+n+1 & [Yn | Xn] & 第N个点的坐标 \\
+\hline
+\end{tabular}
+\caption{POLYLINE的DATA\_BLOCK}
+\end{table}
+\begin{verbatim}
+  1 void r5xx_draw_line_2d(struct radeon_device *rdev, uint64_t fb_location,
+  2             int *points, int num ,int color, int fb_w, int fb_h)
+  3 {
+  4     int r;
+  5     struct radeon_fence *fence = NULL;
+  6     int ndw = 32 + 6 + num;// ?? 32 is enough
+  7     int i = 0;
+  8
+  9     r = radeon_fence_create(rdev, &fence);
+ 10     if (r) {
+ 11         DRM_ERROR("Failed to create fence\n");
+ 12         goto out_cleanup;
+ 13     }
+ 14     r = radeon_ring_lock(rdev, ndw);
+ 15     radeon_ring_write(rdev, PACKET3(PACKET3_POLYLINE, 4 + num));
+ 16     radeon_ring_write(rdev,
+ 17             RADEON_GMC_DST_PITCH_OFFSET_CNTL |
+ 18             RADEON_GMC_DST_CLIPPING | // important
+ 19             RADEON_GMC_BRUSH_SOLID_COLOR |        // 13 << 4
+ 20             (RADEON_COLOR_FORMAT_ARGB8888 << 8) |   //  << 8
+ 21             RADEON_GMC_SRC_DATATYPE_COLOR |      // ??  4 << 12
+ 22             RADEON_ROP3_P |                      // << 16
+ 23             RADEON_GMC_CLR_CMP_CNTL_DIS);
+ 24     radeon_ring_write(rdev, ((fb_w * 4 / 64) << 22) | (fb_location >>10));
+ 25     radeon_ring_write(rdev, 0 | (0 << 16));
+ 26     radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16));
+ 27     radeon_ring_write(rdev, color);
+ 28     for( i = 0; i < num; ++i){
+ 29            radeon_ring_write(rdev, *points++);
+ 30     }
+ 31     radeon_ring_write(rdev, PACKET0(RADEON_DSTCACHE_CTLSTAT, 0));
+ 32     radeon_ring_write(rdev, RADEON_RB2D_DC_FLUSH_ALL);
+ 33     radeon_ring_write(rdev,
+ 34             RADEON_WAIT_2D_IDLECLEAN |
+ 35             RADEON_WAIT_HOST_IDLECLEAN |
+ 36             RADEON_WAIT_DMA_GUI_IDLE);
+ 37
+ 38     if(fence) {
+ 39         r = radeon_fence_emit(rdev, fence);
+ 40     }
+ 41     radeon_ring_unlock_commit(rdev);
+ 42     r = radeon_fence_wait(fence, false);
+ 43     if (r) {
+ 44         DRM_ERROR("Failed to wait for fence\n");
+ 45         goto out_cleanup;
+ 46     }
+ 47
+ 48 out_cleanup:
+ 49     if(fence) {
+ 50         radeon_fence_unref(&fence);
+ 51     }
+ 52 }
+\end{verbatim}
+
+注意到这里调用了三个函数处理fence：\\
+radeon\_fence\_create，创建一个fence;\\
+radeon\_fence\_emit，在提交ring buffer之前发送fence;\\
+radeon\_fence\_wait，等待fence。\\
+在中断机制章节中会详细介绍。
+
+\noindent \textbf{画矩形}
+
+使用PAINT\_MULTI绘制矩形，前面已经给出了PAINT\_MULTI的DATA\_BLOCK，这里不再重复。下面的代码省略了错误处理。
+\begin{verbatim}
+  1 void r5xx_draw_rectangl_2d(struct radeon_device *rdev, uint64_t fb_location,
+  2                 int x, int y, int w, int h, int color, int fb_w, int fb_h)
+  3 {
+  4     int r;
+  5     int ndw = 32 + 6;// ?? 32 is enough
+  6     struct radeon_fence *fence = NULL;
+  7
+  8     r = radeon_fence_create(rdev, &fence);
+......
+ 13     r = radeon_ring_lock(rdev, ndw);
+......
+ 18     radeon_ring_write(rdev, PACKET3(PACKET3_PAINT_MULTI, 6));
+ 19     radeon_ring_write(rdev,
+ 20             RADEON_GMC_DST_PITCH_OFFSET_CNTL |
+ 21             RADEON_GMC_DST_CLIPPING | // important
+ 22             RADEON_GMC_BRUSH_SOLID_COLOR |        // 13 << 4
+ 23             (RADEON_COLOR_FORMAT_ARGB8888 << 8) |   //  << 8
+ 24             RADEON_GMC_SRC_DATATYPE_COLOR |      // ??  4 << 12
+ 25             RADEON_ROP3_P |                      // << 16
+ 26             RADEON_GMC_CLR_CMP_CNTL_DIS);          // 1 << 28
+ 27
+ 28     radeon_ring_write(rdev, ((fb_w * 4 / 64) << 22) | (fb_location >>10));
+ 29     radeon_ring_write(rdev, 0 | (0 << 16));
+ 30     radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16));
+ 31
+ 32     radeon_ring_write(rdev, color); // this is color
+ 33     radeon_ring_write(rdev, (x << 16) | y);
+ 34     radeon_ring_write(rdev, (w << 16) | h);
+ 35
+ 36     radeon_ring_write(rdev, PACKET0(RADEON_DSTCACHE_CTLSTAT, 0));
+ 37     radeon_ring_write(rdev, RADEON_RB2D_DC_FLUSH_ALL);
+ 38     radeon_ring_write(rdev, PACKET0(RADEON_WAIT_UNTIL, 0));
+ 39     radeon_ring_write(rdev,
+ 40           RADEON_WAIT_2D_IDLECLEAN |
+ 41           RADEON_WAIT_HOST_IDLECLEAN |
+ 42           RADEON_WAIT_DMA_GUI_IDLE);
+ 43
+ 44     r = radeon_fence_emit(rdev, fence);
+......
+ 49     radeon_ring_unlock_commit(rdev);
+ 50     r = radeon_fence_wait(fence, false);
+......
+ 55 out_cleanup:
+......
+ 59 }
+\end{verbatim}
+
+
+
+\noindent \textbf{块拷贝}
+
+BLT操作需要指定源和目的，因此相比前面的PAINT\_MULTI，在IT\_BODY部分多了SRC相关的位，在DATA\_BLOCK部分也有SRC相关的参数:
+\begin{table}[!hbp]
+\begin{tabular}{|l|l|p{10cm}|}
+\hline
+Ordinal & Field name & Description \\
+\hline
+1 & [ SRC\_X1 | SRC\_Y1 ] & 源位图的左上角坐标 \\
+\hline
+2 & [ DST\_X1 | DST\_Y1 ] & 目的位图左上角的坐标 \\
+\hline
+3 & [ SRC\_W1 | SRC\_H1 ] & 源位图的宽和高 \\
+... & & \\
+\hline
+3n & [ SRC\_Xn | SRC\_Yn ] & 第n块源位图的左上角坐标 \\
+\hline
+3n+1 & [ DST\_Xn | DST\_Yn ] & 第n块目的位图左上角的坐标 \\
+\hline
+3n+2 & [ SRC\_Wn | SRC\_Hn ] & 第n块源位图的宽和高 \\
+\hline
+\end{tabular}
+\caption{BITBLT\_MULTI的DATA\_BLOCK}
+\end{table}
+
+
+\begin{verbatim}
+  1 void r6xx_blit_2d(struct radeon_device *rdev,
+  2             uint64_t src_ad, uint64_t dst_addr,
+  3             int src_x, int src_y, int dst_x, int dst_y,
+  4             int src_w, int src_h, int fb_w, int fb_h)
+  5 {
+  6     int r;
+  7     int ndw;
+  8     struct radeon_fence *fence = NULL;
+  9     ndw = 64 + 10;
+ 10
+......
+ 21     radeon_ring_write(rdev, PACKET3(PACKET3_BITBLT_MULTI, 8));
+ 22     radeon_ring_write(rdev,
+ 23                 RADEON_GMC_SRC_PITCH_OFFSET_CNTL |
+ 24                 RADEON_GMC_DST_PITCH_OFFSET_CNTL |
+ 25                 RADEON_GMC_SRC_CLIPPING |
+ 26                 RADEON_GMC_DST_CLIPPING |
+ 27                 RADEON_GMC_BRUSH_NONE |
+ 28                 (RADEON_COLOR_FORMAT_ARGB8888 << 8) |
+ 29                 RADEON_GMC_SRC_DATATYPE_COLOR |
+ 30                 RADEON_ROP3_S |
+ 31                 RADEON_DP_SRC_SOURCE_MEMORY |
+ 32                 RADEON_GMC_CLR_CMP_CNTL_DIS |
+ 33                 RADEON_GMC_WR_MSK_DIS);
+ 34 // SRC_PITCH_OFFSET
+ 35     radeon_ring_write(rdev, ((fb_w * 4/64) << 22) | (src_addr >> 10));
+ 36 // DST_PITCH_OFFSET
+ 37     radeon_ring_write(rdev, ((fb_w * 4/64) << 22) | (dst_addr >> 10));
+ 38 // SRC_SC_BOT_RITE
+ 39 //  radeon_ring_write(rdev, (0x1fff) | (0x1fff << 16));
+ 40     radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16));
+ 41 // SC_TOP_LEFT
+ 42     radeon_ring_write(rdev, 0 | (0 << 16));
+ 43 // SC_BOT_RITE
+ 44 //  radeon_ring_write(rdev, (0x1fff) | (0x1fff << 16));
+ 45     radeon_ring_write(rdev, (fb_w -1) | ((fb_h -1) << 16));
+ 46 // [SRC_X1 | SRC_Y1]
+ 47     radeon_ring_write(rdev, (src_x << 16) | src_y);
+ 48 // [DST_X1 | DST_Y1]
+ 49     radeon_ring_write(rdev, (dst_x << 16) | dst_y);
+ 50 // [SRC_W1 | SRC_H1]
+ 51     radeon_ring_write(rdev, (src_w << 16) | src_h);
+ 52 ......
+ 53 }
+\end{verbatim}
+
+
+
+\section{中断机制}
+
+
+在CPU看来，可以将中断分成两种方式：硬件中断和软件中断（说法不准确？？），比如网卡产生的中断称为硬件中断，而如果是软件使用诸如"int 0x10"（X86平台上）这样的指令也能够产生中断，称为软件中断，硬件中断是异步的，其发生的时机是不可预测的，但是软件中断是同步的，CPU是“确切”知道其发生的时机的。
+
+同样的，在GPU开来，中断也可以分成“硬件中断”和“软件中断”两类，比如热插拔事件或者vblank事件都会产生“硬件中断”，这些事件在GPU看来是异步的，GPU不知道这些事情何时发生。
+
+GPU也可以使用类似CPU的int指令那样产生中断，考虑这样一种情形：驱动向硬件发送了绘图命令后必须等到硬件执行完了这些命令后才能继续执行后面的代码，否则硬件的上一次命令没有执行完就继续执行下一次命令会导致错误，显卡可以采用软中断机制，在完成绘图命令后执行一个类似“int xx”的命令产生中断，这里GPU是“确切”知道中断发生的时机的----即在绘图命令完成的时候。
+
+前面章节反复提到的fence就是这种“软件中断”的具体应用。本章除非特别指明，所有出现“软件中断”的地方都是指上文提及的“软件通过对GPU进行编程而使GPU产生的中断”，需要和linux内核中断机制中的“软中断”或者在某些场合下将“信号”当成“软件中断”的情况加以区别。
+
+本章将通过分析linux内核radeon驱动的中断部分的代码阐明radeon GPU的中断机制。这里主要选用r600核心的代码，其它核心的中断机制大体上是一样的。
+
+内核radeon驱动R600显卡中断相关的代码可以分为两个部分，一部分是驱动程序初始化；包括中断控制器初始化，中断状态初始化，中断ring环初始化等。另一部分是中断处理函数。
+
+\subsection{中断初始化}
+
+\subsection{软中断}
+
+在GPU命令一章中我们看到，fence是按照下面的步骤使用的：
+
+\begin{verbatim}
+radeon_fence_create->radeon_fence_emit->radeon_fence_wait
+\end{verbatim}
+
+radeon驱动中的fence机制用于同步GPU和CPU，Fence机制的实现依赖GPU产生的软中断和scratch寄存器。
+
+CP完成一个绘图操作后执行产生中断的命令，向CPU发送一次中断信号，这里的“产生中断的命令”其实就是写CP\_INT\_STAT寄存器。
+在radeon驱动代码中，完成向ring buffer中填充绘图命令后，会调用radeon\_fence\_emit函数（参考GPU命令包章节的代码），在r600显卡上最终调用r600\_fence\_ring\_emit函数，该函数中有如下代码：
+\begin{verbatim}
+2327 void r600_fence_ring_emit(struct radeon_device *rdev,
+2328               struct radeon_fence *fence)
+......
+2347         /* Emit fence sequence & fire IRQ */
+2348         radeon_ring_write(rdev, PACKET3(PACKET3_SET_CONFIG_REG, 1));
+2349         radeon_ring_write(rdev, ((rdev->fence_drv.scratch_reg -
+PACKET3_SET_CONFIG_REG_OFFSET) >> 2));
+2350         radeon_ring_write(rdev, fence->seq);
+2351         /* CP_INTERRUPT packet 3 no longer exists, use packet 0 */
+2352         radeon_ring_write(rdev, PACKET0(CP_INT_STATUS, 0));
+2353         radeon_ring_write(rdev, RB_INT_STAT);
+\end{verbatim}
+
+这里让GPU执行的命令(2352-2353行代码)类似我们在操作系统中让CPU执行的“int xx” 指令，这两句代码的意思是写CP\_INT\_STATUS寄存器，但是注意到寄存器CP\_INT\_STATUS 是一个中断状态寄存器，驱动通过MMIO的方式是无法写这个寄存器的，但是如果CP写这个寄存器就会产生“软件中断”。[当前观察到的现象是这样的]
+通常硬件会有一些寄存器用于表示中断相关信息，在硬件产生中断的时候将相关信息写入寄存器中，驱动读取这些寄存器就能知道和中断相关的具体信息。Radeon GPU中除了有这类寄存器外（[表明中断类型？？]），scratch寄存器可以派上用场。
+在内核radeon驱动中，每一个fence都被分配了唯一的ID号（seq），在radeon\_fence\_emit中有如下代码：
+\begin{verbatim}
+ 71 int radeon_fence_emit(struct radeon_device *rdev, struct radeon_fence *fence )
+......
+ 80     fence->seq = atomic_add_return(1, &rdev->fence_drv.seq);
+\end{verbatim}
+
+2340-2350行代码fence$\rightarrow$seq的值被写入一个scratch寄存器，所以当绘图命令完成中断产生之前scratch寄存器就会是被置为这个唯一的ID号，读取scratch寄存器就能够知道是哪一次绘图命令产生的中断。
+
+Fence中断处理函数是radeon\_fence\_poll\_locked。首先读取fence编号，知道是那一次fence操作产生的中断，当产生中断的fence编号是最后一个编号时，需要将最后一个fence编号赋值为当前编号，同时更新fence定时器。如果不是最后一个fence编号产生的中断，就需要判断定时器，然后唤醒fence中断队列。
+
+
+\ifx \allfiles \undefined
+\end{document}
+\fi

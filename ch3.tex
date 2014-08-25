@@ -1,0 +1,996 @@
+% chapx.tex
+\ifx \allfiles \undefined
+\documentclass[a4paper]{article}
+%\usepackage[paperwidth=145mm,paperheight=99.5mm,text={134mm,120mm},left=6mm,top=-7mm]{geometry} % 页面设置
+\usepackage[left=30mm, right=30mm,top=30mm]{geometry} % 页面设置
+\usepackage{comment}
+%\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{ctexcap}
+\usepackage[labelfont=bf,labelsep=quad]{caption}
+  \DeclareCaptionFont{kai}{\kaishu}
+  \captionsetup{textfont=kai}
+%\usepackage{graphicx,floatrow,subfig}
+\usepackage{graphicx,subfig}
+%\usepackage{epstopdf}
+
+\begin{document}
+\title{AMD R6xx显卡图形加速编程}
+\author{谭耀华\   赵自成}
+\date{\today}
+\maketitle
+\graphicspath{{./}{fig/}}
+\tableofcontents
+\else
+\chapter{AMD R6xx显卡图形加速编程}
+\fi
+
+
+
+\section{实时计算机图形学基础}
+\subsection{图形流水线}
+
+
+
+\subsection{模型视图变换}
+\subsection{光照模型}
+\subsection{纹理和着色}
+\subsection{OpenGL编程接口和GLSL着色语言}
+
+【这里介绍简单的GLSL程序，后续需要使用】
+较早的GPU和OpenGL基于固定的图形渲染流水线，OpenGL（1.x版本）的实现是一个“状态机”，用户通过3D API提供的函数设置好相应的状态，例如变换矩阵、材质参数、光源参数、纹理混合模式等，然后传入顶点流。图形硬件则利用内置的固定渲染流水线和渲染算法对这些顶点进行几何变换、光照计算、光栅化、纹理混合、雾化操作，最终将处理结果写入帧缓冲区。这种渲染体系限制用户只能使用图形硬件中固化的各种渲染算法。这虽然可以很好的满足对渲染质量要求不高的应用，但难以满足那些需要更高的灵活性和更真实的渲染质量的实时图形应用。
+
+随着3D应用的发展，用户已经不再满足于基于顶点的近似Phong模型光照计算(这是早期OpenGL采用的光照计算模型)和简单的多纹理混合，传统的图形硬件无法满足用户对于更加真实的3D渲染的需求，于是有了可编程顶点处理器和可编程片段处理器的出现。
+
+响应的，软件也因为这种变化发生了改变，可编程处理器的出现导致了GLSL这样的语言的出现。我们使用一个简单的例子；
+
+
+
+\section{R6xx显卡核心的3D引擎}
+【前面已经介绍AMD显卡】
+
+R6xx核心是AMD一款非常重要的GPU核心，这个核心引入了统一处理器架构，因而其寄存器和指令集和以前的GPU 都完全不同，对其编程也有一定区别。
+\subsection{R6xx显卡核心3D引擎组成}
+
+
+图\ref{r600block}显示了R600GPU 核心的硬件逻辑图，R600 GPU 包含并行数据处理阵列（DPP array）、命令处理器、内存控制器以及其他逻辑部件，R600的命令处理器【或者称为微引擎？】读取驱动编写命令并解析命令以，R600还要将硬件产生的“软中断”发送给CPU。R600的内存控制器能够访问R600 GPU核上的所有内存（VRAM内存，或者称本地内存）以及用户配置的系统内存，为了满足GPU 读写的需要，R600 GPU还要完成DMA控制器的功能。
+
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.8]{r600block}\\
+  \caption{R6xx核心逻辑结构图}\label{r600block}
+\end{figure}
+
+CPU上运行的程序不能够直接写R600 GPU的本地内存，但是CPU程序能够命令R600将数据或者程序拷贝到R600 本地内存或者从本地内存拷贝数据到系统内存上。
+
+完整的能够在R600上运行的程序包含两个部分：一部分是在主机（CPU）上运行的程序，一部分是在R600处理器上运行的程序，处理图形应用时这部分程序称为Shader 程序，进行GPU 通用计算时，这部分程序称为Kernel 程序。
+
+\subsection{R6xx显卡核心图形处理流水线}
+前面章节已经描述了实时计算机图形学里面的图形处理流水线，本节针对R600描述在R600 GPU上的图形处理过程。图\ref{r600pipeline}显示了R600 GPU处理图形数据的过程。
+
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.2]{r600pipeline}\\
+  \caption{R600图形处理流水线}\label{r600pipeline}
+\end{figure}
+
+\subsubsection{命令处理} 命令处理器处理环形命令缓冲区和间接缓冲区中的命令流，命令处理器处理这些命令流的时候通常会产生一系列的写寄存器活动（后面会讨论一些寄存器的读写问题，有些寄存器只能使用命令流的形式写，而且无法读）。驱动设置好index buffer（GTT内存）并将index buffer告知硬件，被命令触发后，“顶点组装和细分器（vertex grouper and tesselator， VGT）”根据index buffer的地址将索引数据DMA到SPI （shader pipe interpolator）上，同时将图元的连接信息发送给“图元组装器”（primitive assembly）。
+
+\subsubsection{顶点处理} 所有的着色处理（shader processing，也即GPU核上进行的各种运算）都是在统一着色器块（unified shader block）中进行的，同一着色器块包含Sequencer （SQ）和Shader pipe（SP）模块，每一个shader程序都能够访问一些通用寄存器，这些通用寄存器是在shader 程序运行之前（由SPI）动态分配的，SPI会往这些寄存器中加载合适的参数，这些参数包括顶点数据的基地址。然后SPI会为SQ启动程序执行过程，shader程序需要做的第一件事情就是取顶点数据，然后针对这个顶点运行shader程序，顶点处理shader的输出被放置到“着色器输出缓存”（shader export，SX）中（由于pixel 处理过程和vertex处理过程在同样的硬件上运行，所以pixel shader的输出也是放到SX 中），R600的顶点处理过程的输出包含两部分：Position Cache 放置顶点的坐标信息，Parameter Cache放置顶点的其他属性信息。
+
+在没有Geometry shader的情况下，顶点数据的处理按照下面流程进行：
+
+\begin{enumerate}
+  \item VGT \footnote{本节内容翻译自R6xx R7xx Acceleration.pdf}一个指向index buffer的指针（如果是立即模式，index buffer是硬件临时指定的？），VGT 遍历所有的索引并一个个发送到SPI 里面
+  \item SPI将其输入缓存中的索引数据组成称为wavefront的向量（wavefront最多64个顶点）
+  \item 当wavefront准备好后，SPI根据驱动提供的大小（驱动向 SQ\_PGM\_RESOURCE\_VS 寄存器写入的）分配GPR（通用寄存器，所有的通用寄存器都是32*4=128bit的，可以存放一个四维的浮点数向量）和线程空间\footnote{前面需要解释线程空间}（thread space），然后这些索引被放入到GPR中（GPR 的id 是由谁指定的），shader core 被通知一个新的wavefront 准备好了；
+  \item Shader core对Wavefront上的每个顶点运行顶点处理程序
+  \begin{enumerate}
+    \item 顶点处理器根据GRP中的索引取出顶点数据（使用fetch指令或者单独的fetch程序）
+    \item 顶点数据被取到GPR中
+    \item Shader程序的其他部分继续运行
+    \item Shader程序在SX的position Cache中分配空间，并将顶点的坐标信息（XYZW）输出到这片空间
+    \item Shader程序在SX的Parameter cache中分配空间，将顶点的其他属性信息（颜色，纹理）发送到这片空间，程序退出
+  \end{enumerate}
+  \item SPI被告知一个wavefront的所有顶点处理完毕，SPI释放掉GPR
+\end{enumerate}
+
+配置好渲染状态后，除了第4）步外，上面的过程对用户（驱动程序）来说是透明的，第4）步是按照用户编写的shader的程序的流程执行的。
+一个vertex shader程序至少要包含a)、b)、d)三个过程，vertex shader 首先通过索引取到顶点数据，然后对这些顶点数据进行运算，运算后的结果分别放入position cache和parameter cache中供后续的部件使用。c）步骤根据shader程序的功能，可能有也可能没有。
+
+\subsubsection{片段处理} 顶点处理完成后，顶点数据被发送到“图元组装器”（PA）中进行图元组装（注意到过程1已经将顶点连接信息发送给了图元组装器），【同时还有一个setup 的过程，查阅相关资料理解setup主要做什么工作？？】，PA的输出被发送给“扫描转换器”（scan convert，SC）进行扫描转换（光栅化过程，差值计算），SC会检查“深度缓存”（Depth buffer，DB）确定片段的可用性，这个检查过程会进行Early Z、Re-Z和HiZ处理（可以这么理解，SC 检查z buffer，如果片段的深度值比depth buffer 中的值还要大，则该片段被遮挡，在没有开启blending的情况下，这个片段可以扔掉，后续就不用处理了，如果开启了blending 的，则还要进行后续处理）。光栅化出来的片段被发送给SPI，再进入到shader core 里面进行最后的片段处理。片段处理器会进行取纹理、ALU计算以及内存读写操作。最后，shader memory exchange 作为shader core的scratch 内存读写cache【？？我们暂时没有用到？？】，完成后，片段的几何信息【在屏幕坐标系中的坐标？？】和颜色信息通过SX （vertex shader也会输出到SX中）发送到DB和CB中进行最后的处理。
+
+顶点数据经过顶点处理流程后，进入光栅化阶段，由Scan Converter对各属性数据进行差值，形成片段数据，片段数据流经片段处理阶段着色，形成可选的像素（或者称为片段 fragment）。
+由于R600是统一处理器架构，顶点处理和片段处理都在同样的硬件上进行，因此片段处理的过程和顶点处理的过程是类似的。
+R600片段处理阶段（包括光栅化阶段）按照如下流程进行：
+\begin{enumerate}
+  \item “图元组装器”（PA）从SX的position buffer中读出顶点的坐标信息，从VGT中读取出顶点连接信息，有了这两方面的信息后，就可以组装出图元；
+  \item 组装出来的图元被发送到SC进行初步的扫描转换；（初步的扫描转换做了些什么工作，将大图元分成小的块tile）
+  \item 初步扫描转换出来的块（tiles，有合适的翻译？？）被送到SPI中进行最后的插值
+    \begin{enumerate}
+      \item SPI分配GPR和线程空间（thread space）（根据驱动指定的大小）；
+      \item SC和SPI从SX的parameter cache中读取顶点的属性数据；
+      \item SPI针对顶点属性计算出插值出来的每个像素的属性
+      \item 将插值后的属性加载到GPR
+    \end{enumerate}
+  \item Shader core被告知一个pixel wavefront到来，准备执行pixel shader
+  \item Shader core对wavefront里面的每一个片段运行pixel shader，pixel shader的结束部分包含将片段属性（颜色）输出到SX 的指令
+  \item SPI被告知wavefront里面的所有片段处理完成，SPI释放GPR和线程空间
+\end{enumerate}
+
+Pixel shader程序将计算的结果输出到SX后将会被送往指定的Render Target，可以一次最多配置8个Render Target。
+
+\subsubsection{最后的渲染} Pixel shader的输出被放到DB和CB中进行最后的处理（对应图1、图2和图3中的raseter operation 和merging 过程），这部分处理包括alpha 测试、深度测试和最后的融合（blending）。
+
+
+\section{R600显卡核心的3D引擎编程}
+\subsection{R600 3D引擎基本状态编程}
+从图\label{r600pipeline}可以看到，3D图形处理流水线需要流经多个硬件单元才能得到最后的渲染结果，所有的硬件单元必须被正确编程，才能得到正确的结果。
+
+本节使用exa驱动的代码详细说明如何对3D引擎进行编程。
+EXA驱动挂接在xorg可加载驱动中，我们采用的代码版本是xf86-video-ati-20110727【查阅该版本号】，
+
+在启用KMS的情况下，Xorg的R600驱动按照如下的调用路径加载EXA驱动：RADEONScreenInit\_ KMS $\rightarrow$ RADEONAccelInit $\rightarrow$ R600DrawInit。
+
+R600DrawInit函数中先为radeon\_accel\_state结构体中的ExaDriverPtr结构体的加速回调函数赋值，这些函数就是实现EXA加速所必须的函数，这些2D加速包括填充矩形（Solid）、块拷贝（Copy）以及混合（Composite）。
+
+调用exaDriverInit将exa驱动注册到Xorg系统中。
+
+然后是调用R600AllocShaders为Shader分配显存，Shaders是GPU上运行的程序必须放在VRAM内存上：
+\begin{verbatim}
+	accel_state->shaders_bo = radeon_bo_open(info->bufmgr, 0, size, 0,
+						 RADEON_GEM_DOMAIN_VRAM, 0);
+\end{verbatim}
+然后加载Shader程序，将为Shader分配的VRAM映射到用户空间，然后以直接写内存的方式将Shader程序加载到VRAM上。然后取消映射：
+\begin{verbatim}
+	ret = radeon_bo_map(accel_state->shaders_bo, 1);
+......
+    accel_state->solid_vs_offset = 0;
+    R600_solid_vs(ChipSet, shader + accel_state->solid_vs_offset / 4);
+......
+	radeon_bo_unmap(accel_state->shaders_bo);
+\end{verbatim}
+
+
+在所有的EXA加速过程中，每一个加速过程都注册了3个函数，分别是R600PrepareXXX、R600XXX和R600DoneXXX，这3个函数分别进行3D 引擎初始化、输入数据触发3D引擎
+以及3D引擎的清理工作。
+
+接下来通过Copy加速过程描述3D引擎的编程过程。
+
+首先是3D引擎的初始化R600PrepareCopy，Copy操作涉及源和目的。
+获取源和目的的图像的pitch值，这里的pitch是图像一行的像素数目（包括可能的空白对齐区域，注意有些时候pitch值指以字节计一行图像占用的内存大小）：
+\begin{verbatim}
+    dst_obj.pitch = exaGetPixmapPitch(pDst) / (pDst->drawable.bitsPerPixel / 8);
+    src_obj.pitch = exaGetPixmapPitch(pSrc) / (pSrc->drawable.bitsPerPixel / 8);
+\end{verbatim}
+获取代表图像显存的显存对象：
+\begin{verbatim}
+	src_obj.bo = radeon_get_pixmap_bo(pSrc);
+	dst_obj.bo = radeon_get_pixmap_bo(pDst);
+\end{verbatim}
+获取源和目的图像的格式信息：
+\begin{verbatim}
+    src_obj.width = pSrc->drawable.width;
+    src_obj.height = pSrc->drawable.height;
+    src_obj.bpp = pSrc->drawable.bitsPerPixel;
+    src_obj.domain = RADEON_GEM_DOMAIN_VRAM | RADEON_GEM_DOMAIN_GTT;
+
+    dst_obj.width = pDst->drawable.width;
+    dst_obj.height = pDst->drawable.height;
+    dst_obj.bpp = pDst->drawable.bitsPerPixel;
+    dst_obj.domain = RADEON_GEM_DOMAIN_VRAM;
+\end{verbatim}
+注意到上面代码的domain域，源可能来自VRAM或者GTT，但是dst是显示区域，一定只可能是VRAM。
+后面还有一段代码用于计算图片的高度和大小。
+
+调用R600SetAccelState函数，该函数只是做了一些软件上的赋值操作，注意copy\_vs\_offset和copy\_ps\_offset都是GPU虚拟地址。
+\begin{verbatim}
+    if (!R600SetAccelState(pScrn,
+			   &src_obj,
+			   NULL,
+			   &dst_obj,
+			   accel_state->copy_vs_offset, accel_state->copy_ps_offset,
+			   rop, planemask))
+	return FALSE;
+\end{verbatim}
+主要的3D引擎初始化工作在R600DoPrepareCopy函数调用里面。
+\begin{verbatim}
+R600DoPrepareCopy(pScrn);
+\end{verbatim}
+
+这部分内容我们将同时结合《Radeon R6xx/R7xx 3D Register Reference Guide》《Radeon R6xx/R7xx Acceleration》两份文档进行说明。
+《Radeon R6xx/R7xx Acceleration》的“3D Engine Programming”部分较为完整的描述了需要编程的部分。
+radeon\_vbo\_check函数获取可用的vertex buffer，如果没有可用的vertex buffer，将会重新分配一个。
+\begin{verbatim}
+    radeon_vbo_check(pScrn, &accel_state->vbo, 16);
+\end{verbatim}
+radeon\_cp\_start用于清空当前命令流中的命令【需要在合适的地方解释命令流CS command stream】：
+\begin{verbatim}
+    radeon_cp_start(pScrn)：
+    if (info->cs) {
+	   if (CS_FULL(info->cs)) {
+	       radeon_cs_flush_indirect(pScrn);
+	   }
+    	accel_state->ib_reset_op = info->cs->cdw;
+    }
+\end{verbatim}
+
+r600\_set\_default\_state设置3D引擎的初始化状态，对R600硬件的配置主要在这个地方。
+\begin{verbatim}
+void r600_set_default_state(ScrnInfoPtr pScrn, drmBufPtr ib):
+
+    if (accel_state->XInited3D)
+	   return;
+    r600_start_3d(pScrn, accel_state->ib);
+
+    sq_conf.ps_prio = 0;
+    sq_conf.vs_prio = 1;
+    sq_conf.gs_prio = 2;
+    sq_conf.es_prio = 3;
+
+    switch (info->ChipFamily) {
+        case CHIP_FAMILY_R600:
+    	sq_conf.num_ps_gprs = 192;
+    	sq_conf.num_vs_gprs = 56;
+    	sq_conf.num_temp_gprs = 4;
+    	sq_conf.num_gs_gprs = 0;
+    	sq_conf.num_es_gprs = 0;
+    	sq_conf.num_ps_threads = 136;
+    	sq_conf.num_vs_threads = 48;
+    	sq_conf.num_gs_threads = 4;
+    	sq_conf.num_es_threads = 4;
+    	sq_conf.num_ps_stack_entries = 128;
+    	sq_conf.num_vs_stack_entries = 128;
+    	sq_conf.num_gs_stack_entries = 0;
+    	sq_conf.num_es_stack_entries = 0;
+	break;
+    r600_sq_setup(pScrn, ib, &sq_conf);
+\end{verbatim}
+accel\_state中的XInited3D域记录了3D引擎是否已经初始化过，如果EXA驱动已经初始化过3D引擎，则无需再度初始化。调用r600\_start\_3d函数
+启动3D引擎的，然后调用r600\_sq\_setup对3D引擎的Sequencer进行配置。
+
+r600\_start\_3d函数启动3D引擎的命令环，在GPU核心小于RV770的情况下，执行如下命令
+\begin{verbatim}
+  void
+r600_start_3d(ScrnInfoPtr pScrn, drmBufPtr ib)：
+
+	BEGIN_BATCH(5);
+	PACK3(ib, IT_START_3D_CMDBUF, 1);
+	E32(ib, 0);
+
+    PACK3(ib, IT_CONTEXT_CONTROL, 2);
+    E32(ib, 0x80000000);
+    E32(ib, 0x80000000);
+    END_BATCH();
+}
+\end{verbatim}
+上面的代码如果转换成是这样的:
+\begin{verbatim}
+  radeon_ring_lock(rdev, 5);
+  radeon_ring_write(rdev, CP_PACKET3(START_3D_CMDBUF, 1));
+  radeon_ring_write(rdev, 0x0);
+  radeon_ring_write(rdev, CP_PACKET3(IT_CONTEXT_CONTROL, 2));
+  radeon_ring_write(rdev, 0x80000000);
+  radeon_ring_write(rdev, 0x80000000);
+\end{verbatim}
+手册上并没有给出START\_3D\_CMDBUF和IT\_CONTEXT\_CONTROL的具体含义，【猜测这里START\_3D\_CMDBUF是将关闭掉Command Buffer。】
+
+接下来是Sequencer的配置，Sequencer可以认为是【？？】GPU的一个控制单元【对应图\ref{r600pipeline}中的SPI】，
+Sequence控制Shader程序的运行。Sequencer相关的寄存器参见《Radeon R6xx/R7xx 3D Register Reference Guide》
+第三节“General Shader Registers”。
+\begin{verbatim}
+static void r600_sq_setup(ScrnInfoPtr pScrn, drmBufPtr ib, sq_config_t *sq_conf):
+......
+    BEGIN_BATCH(8);
+    PACK0(ib, SQ_CONFIG, 6);
+    E32(ib, sq_config);
+    E32(ib, sq_gpr_resource_mgmt_1);
+    E32(ib, sq_gpr_resource_mgmt_2);
+    E32(ib, sq_thread_resource_mgmt);
+    E32(ib, sq_stack_resource_mgmt_1);
+    E32(ib, sq_stack_resource_mgmt_2);
+    END_BATCH();
+\end{verbatim}
+注意到这里写寄存器的方式，注意到PACK0的定义：
+\begin{verbatim}
+#define PACK0(ib, reg, num)                                             \
+do {                                                                    \
+    if ((reg) >= SET_CONFIG_REG_offset && (reg) < SET_CONFIG_REG_end) {	\
+	PACK3((ib), IT_SET_CONFIG_REG, (num) + 1);			\
+	E32((ib), ((reg) - SET_CONFIG_REG_offset) >> 2);		\
+    } else if ((reg) >= SET_CONTEXT_REG_offset && (reg) < SET_CONTEXT_REG_end) { \
+	PACK3((ib), IT_SET_CONTEXT_REG, (num) + 1);			\
+	E32((ib), ((reg) - SET_CONTEXT_REG_offset) >> 2);		\
+    } else if ((reg) >= SET_ALU_CONST_offset && (reg) < SET_ALU_CONST_end) { \
+	PACK3((ib), IT_SET_ALU_CONST, (num) + 1);			\
+	E32((ib), ((reg) - SET_ALU_CONST_offset) >> 2);			\
+    }
+    ......
+    else {								\
+	E32((ib), CP_PACKET0 ((reg), (num) - 1));			\
+    }									\
+} while (0)
+\end{verbatim}
+
+地址小于SET\_CONFIG\_REG\_offset（0x8000）的寄存器必须使用3型命令包写，这些寄存器只有GPU自己能够访问，因此访问这些寄存器必须
+使用GPU命令让GPU自己，不能使用通常直接写寄存器的方式，
+我们上面这段代码改写成：
+\begin{verbatim}
+  radeon_ring_lock(rdev, 8);
+  radeon_ring_write(rdev, CP_PACKET3(IT_SET_CONFIG_REG, 7));
+  radeon_ring_write(rdev, (SQ_CONFIG - IT_SET_CONFIG_REG) >> 2);
+  radeon_ring_write(rdev, sq_config);
+  radeon_ring_write(rdev, sq_gpr_resource_mgmt_1);
+  radeon_ring_write(rdev, sq_gpr_resource_mgmt_2);
+  radeon-ring_write(rdev, sq_thread_resource_mgmt);
+  radeon_ring_write(rdev, sq_stack_resource_mgmt_1);
+  radeon_ring_write(rdev, sq_stack_resource_mgmt_2);
+  radeon_ring_unlock(rdev);
+\end{verbatim}
+
+
+这是一个3型命令包，包头IT\_SET\_CONFIG\_REG表明这个命令用于“Write Register Data to a Location on Chip”，即写片上的寄存器，
+这个命令包的第第二个DWORD是寄存器相对于IT\_SET\_CONFIG\_REG（0x8000）的偏移（以DWORD计），命令包后续的内容是往offset 开始
+的连续几个寄存器里面写入的值，这里总共写了6个寄存器。
+这里配置的是地址为0x8c00（SQ\_CONFIG）开始的几个寄存器。在寄存器手册搜索地址为0x8c00、0x8c04、0x8c08、0x8c0c、0x8c10、0x8c12
+的这几个寄存器可以查看详细说明，这里对SQ设置的参数同时需要考虑硬件的能力和软件的需求。
+对SQ的配置包括通用寄存器数目的配置、线程数目的配置以及堆栈资源的分配。
+目前为止，碰到的寄存器有三类，使用的时候要注意区分：
+\begin{description}
+  \item[CPU可访问的寄存器] 这类寄存器可以映射到进程地址空间，驱动程序可以直接访问
+  \item[GPU内部寄存器] 这类寄存器不能被驱动程序直接访问，只能由GPU的命令处理器访问，驱动程序只能通过写GPU命令的方式写这些寄存器
+  \item[Shader通用寄存器] 这类寄存器用于执行Shader程序的时候使用，类似x86上的eax、ebx这样的寄存器.
+\end{description}
+
+\begin{verbatim}
+
+	sq_conf.num_ps_gprs = 192;
+	sq_conf.num_vs_gprs = 56;
+	sq_conf.num_temp_gprs = 4;
+\end{verbatim}
+以上代码为每个【确认per simd 是什么意思，似乎不是这个意思，所有运行的thread实例共能够使用这么多通用寄存器】PS程序分配的寄存器数目为192个，
+为VS程序分配的通用寄存器数目为56。
+
+\begin{verbatim}
+	sq_conf.num_ps_threads = 136;
+	sq_conf.num_vs_threads = 48;
+\end{verbatim}
+同时【？？】运行ps程序的线程为136个，同时运行vs程序的线程数目为48个。
+
+EXA程序中不需要使用GS和ES，Shader也不需要使用堆栈，对于GS、ES和堆栈的配置跳过。
+
+\begin{verbatim}
+   PACK0(ib, SQ_VTX_BASE_VTX_LOC, 2);
+    E32(ib, 0);
+    E32(ib, 0);
+\end{verbatim}
+上面代码向SQ\_VTX\_START\_INST\_LOC和SQ\_VTX\_BASE\_VTX\_LOC两个寄存器中写入0，这两个寄存器的含义涉及到GPU取顶点数据
+的寻址过程，GPU取顶点数据的时候按照下面的方式寻址：
+\begin{equation}\label{addressing}
+  fetch\_addr = (index + index\_offset) * stride + base + offset
+\end{equation}
+
+其中index是通用寄存器中的值，为顶点的索引值，后面讨论GPU指令的时候还会涉及到；index\_offset中的值即来自SQ\_VTX\_START\_INST\_LOC
+和SQ\_VTX\_BASE\_VTX\_LOC两个寄存器，可以根据Shader程序中的相应位选择使用哪个寄存器的值，stride是设置顶点资源的时候设置的，为一个
+顶点的全部数据占的字节数。base也是设置顶点资源的时候配置的，为顶点内存（vertex buffer）的地址（GPU虚拟地址），offset 指明取顶点的
+哪部分数据，后面讨论GPU指令集的时候还会讨论。
+
+然后是对GS和ES之间的ring的配置【查阅？？】，exa驱动并没有使用，略过。
+
+接下来是对Depth test、Stencil test和alpha test的配置：
+
+\begin{verbatim}
+    EREG(ib, DB_DEPTH_CONTROL, 0);
+    PACK0(ib, DB_RENDER_CONTROL, 2);
+    E32(ib, STENCIL_COMPRESS_DISABLE_bit | DEPTH_COMPRESS_DISABLE_bit);
+    E32(ib, FORCE_SHADER_Z_ORDER_bit);
+
+    EREG(ib, DB_ALPHA_TO_MASK,((2 << ALPHA_TO_MASK_OFFSET0_shift)	|
+						   (2 << ALPHA_TO_MASK_OFFSET1_shift)	|
+						   (2 << ALPHA_TO_MASK_OFFSET2_shift)	|
+						   (2 << ALPHA_TO_MASK_OFFSET3_shift)));
+    EREG(ib, DB_SHADER_CONTROL, ((1 << Z_ORDER_shift) | /* EARLY_Z_THEN_LATE_Z */
+				 DUAL_EXPORT_ENABLE_bit)); /* Only useful if no depth export */
+
+    PACK0(ib, DB_STENCIL_CLEAR, 2);
+    E32(ib, 0); // DB_STENCIL_CLEAR
+    E32(ib, 0); // DB_DEPTH_CLEAR
+
+    PACK0(ib, DB_STENCILREFMASK, 3);
+    E32(ib, 0); // DB_STENCILREFMASK
+    E32(ib, 0); // DB_STENCILREFMASK_BF
+    E32(ib, 0); // SX_ALPHA_REF
+\end{verbatim}
+往寄存器DB\_DEPTH\_CONTROL写入0将关闭depth test和stencil test。\\
+【DB\_RENDER\_CONTROL？？】，关闭掉压缩功能？？（具体查阅寄存器手册）。\\
+【DB\_SHADER\_CONTROL？？】\\
+【】
+
+对viewport、windows、clip、scissor等的配置【查阅？？】。
+
+对光栅化部件的编程【查阅相关资料详细描述】：
+\begin{verbatim}
+    PACK0(ib, PA_SC_LINE_CNTL, 9);
+    E32(ib, 0); // PA_SC_LINE_CNTL
+    E32(ib, 0); // PA_SC_AA_CONFIG
+    E32(ib, ((2 << PA_SU_VTX_CNTL__ROUND_MODE_shift) | PIX_CENTER_bit | // PA_SU_VTX_CNTL
+	     (5 << QUANT_MODE_shift))); /* Round to Even, fixed point 1/256 */
+    EFLOAT(ib, 1.0);          // PA_CL_GB_VERT_CLIP_ADJ
+    EFLOAT(ib, 1.0);          // PA_CL_GB_VERT_DISC_ADJ
+    EFLOAT(ib, 1.0);          // PA_CL_GB_HORZ_CLIP_ADJ
+    EFLOAT(ib, 1.0);          // PA_CL_GB_HORZ_DISC_ADJ
+    E32(ib, 0);               // PA_SC_AA_SAMPLE_LOCS_MCTX
+    E32(ib, 0);               // PA_SC_AA_SAMPLE_LOCS_8S_WD1_M
+
+    EREG(ib, PA_SC_AA_MASK, 0xFFFFFFFF);
+\end{verbatim}
+
+
+对semantic table的编程：
+\begin{verbatim}
+    /* default Interpolator setup */
+    EREG(ib, SPI_VS_OUT_ID_0, ((0 << SEMANTIC_0_shift) |
+			       (1 << SEMANTIC_1_shift)));
+   PACK0(ib, SPI_PS_INPUT_CNTL_0 + (0 << 2), 2);
+    /* SPI_PS_INPUT_CNTL_0 maps to GPR[0] - load with semantic id 0 */
+    E32(ib, ((0    << SEMANTIC_shift)	|
+	     (0x01 << DEFAULT_VAL_shift)	|
+	     SEL_CENTROID_bit));
+    /* SPI_PS_INPUT_CNTL_1 maps to GPR[1] - load with semantic id 1 */
+    E32(ib, ((1    << SEMANTIC_shift)	|
+	     (0x01 << DEFAULT_VAL_shift)	|
+	     SEL_CENTROID_bit));
+\end{verbatim}
+
+图形处理流水线上，每一个过程都是相对独立的，这里有一些过程是由应用程序（或者驱动程序）决定的，比如输入数据的格式，
+顶点数据根据具体应用的不同会有不同，比如最简单的应用只包含顶点坐标，
+复杂一点的可能还包含顶点颜色、纹理坐标、法向量数据等，再比如可编程处理器的Shader程序是应用程序或者驱动程序确定的，
+输出数据的格式是由应用程序或者驱动程序决定的，必须通过某种方式将这些"可编程"部分流出的数据告诉下一个阶段的部件。
+
+先看输入的顶点数据和顶点处理器流出的数据。
+在早期的固定流水线的显卡上，应用程序或者驱动必须告诉显卡
+输入数据具体包含哪些分量，比如R100/R200显卡是通过VAP\_VTX\_FMT\_0/1这两个寄存器配置顶点数据的格式的，这两个寄存器
+都有很多位，每一位都对应某一属性数据，如果这一位被置1，则表明输入数据包含这一属性，而且输入数据的各个属性之间必
+须按照规定的先后顺序排列。到R300以后，可编程处理器被引入，此时可编程处理器是不需要知道数据属性的，因为顶点处理
+程序是由程序员或者编译器编写的，程序员或者编译器是知道数据的格式的，此时VAP\_VTX\_FMT\_0/1这两个寄存器就被废除了，
+取而代之的是一个表明顶点数据数据大小（占用的字节数）的寄存器，取顶点数据的硬件只需根据每个顶点数据的大小从顶点数据
+缓冲区中取出一个顶点的全部数据然后跳到下一个顶点取下一个顶点的数据就可以了，顶点数据送到Shader运行，编写Shader的程序员
+或者编译器知道数据的格式，然后对数据进行处理。在没有Fetch shader的情况下，R600对顶点数据格式的处理和R300是类似的，后面
+设置顶点数据资源的时候将会看到某个寄存器的Stride位记录的就是顶点数据的大小。如果有Fetch shader，这必须配置一个semantic table，
+EXA驱动里面没有使用Fetch Shader，但是后面的Vertex shader和光栅化部件以及Pixel Shader有类似的semantic table，上面一段程序的
+semantic table就是针对这个设计的。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.2]{semantic}\\
+  \caption{VS和PS之间的semantic table和数据对应关系}\label{semantic}
+\end{figure}
+
+图\ref{semantic}显示了一个完整的semantic的数据转化过程，SPI\_VS\_OUT\_ID寄存器共有10个，每个寄存器有是个域，每个域里代表
+semantic table中的一项，根据SPI\_VS\_OUT\_CONFIG 寄存器的配置，SPI\_VS\_OUT\_ID系列寄存器的每一个域代表一个向量或者向量的
+一个分量，这里配置的是代表一个向量，EXA驱动用到的顶点属性比较少，因此需要的semantic table也不大。SPI\_VS\_OUT\_ID\_0的第0
+个域代表Parameter Cache中的第0个向量，第1个域代表Parameter Cache中的第1个域，一次类推，为了能够更清晰的说明问题，图中显示
+的内容和EXA驱动稍微有点差异，SPI\_VS\_OUT\_ID\_0寄存器的第0个域填充的是1，表明需要查询semantic table的第1项，semantic table
+是由SPI\_PS\_INPUT\_CNTL一系列共32个寄存器组成的，每个寄存器代表semantic table的一项，SPI\_PS\_INPUT\_CNTL\_1寄存器的SEMANTIC位
+的内容为1，对应Pixel Shader的GPR1，因此光栅化部件处理完，将像素的纹理信息放到Pixel Shader的GPR1中，Pixel Shader程序从GPR1中
+可以取到纹理数据，同样的，法向量信息被放置到GPR0中。【Position数据也可能进入到Pixel shader中？semantic table还需要包含Position
+的相关条项？？查阅相关寄存器】
+
+和semantic table还有一处代码，
+\begin{verbatim}
+    r600_set_spi(pScrn, accel_state->ib, (1 - 1), 1);
+
+void
+r600_set_spi(ScrnInfoPtr pScrn, drmBufPtr ib, int vs_export_count, int num_interp)
+{
+    RADEONInfoPtr info = RADEONPTR(pScrn);
+
+    BEGIN_BATCH(8);
+    /* Interpolator setup */
+    EREG(ib, SPI_VS_OUT_CONFIG, (vs_export_count << VS_EXPORT_COUNT_shift));
+    PACK0(ib, SPI_PS_IN_CONTROL_0, 3);
+    E32(ib, (num_interp << NUM_INTERP_shift));
+    E32(ib, 0);
+    E32(ib, 0);
+    END_BATCH();
+}
+\end{verbatim}
+
+首先是写SPI\_VS\_OUT\_CONFIG寄存器，这里VS\_PER\_COMPONENT位为0，表明一个向量在semantic中占一个条目，VS\_EXPORT\_COUNT为0，表明Vertex Shader输出了1个向量，在BLT过程中，就是输出了一个纹理坐标这一个向量。
+
+然后是写SPI\_PS\_IN\_CONTROL\_0、SPI\_PS\_IN\_CONTROL\_1和SPI\_INTERP\_CONTROL\_0四个寄存器，SPI\_PS\_IN\_CONTROL\_0的NUM\_INTERP表明有一个属性需要进行差值，【手册上说需要包括位置信息，那么这里应该有位置坐标和纹理坐标两个属性需要差值？？】这个寄存器里面还有一个比较重要的位POSITION\_ENA，表明位置信息是否也加载到PS中，【如果这一位开启的话，是否SPI\_PS\_IN\_CONTROL\_0的NUM\_INTERP位和semantic table都需要修改？？】
+
+
+接下来是对雾效果的处理，EXA驱动中并没有使用雾效果，因此这里相关配置全部填充的是0。
+
+然后是对Fetch Shader的的配置：
+\begin{verbatim}
+    r600_fs_setup(pScrn, ib, &fs_conf, RADEON_GEM_DOMAIN_VRAM);
+\end{verbatim}
+前面有代码将fs\_conf变量置为0：
+\begin{verbatim}
+    memset(&fs_conf, 0, sizeof(shader_config_t));
+\end{verbatim}
+调用r600\_fs\_setup实际上是将FS的配置清空为0，EXA驱动中不使用Fetch Shader，Fetch Shader的配置和Vertex Shader的配置基本相同，
+后面使用的时候还会提到。
+
+然后是VGT的配置，VGT是最早接触顶点数据的部件，VGT中的信息在图元组装的时候也会被使用，VGT包含了两方面的内容：一部分是Vertex Group，
+另外一部分是Tesselator，关于VGT的配置的细节，这里不进行论述，后面DirectFB驱动的代码基本上按照默认参数设置，读者可以参考寄存器手册。
+其中PA\_SU\_POINT\_SIZE和PA\_SU\_LINE\_CNTL可能会用到，分别用于控制点的大小和线的粗细。
+
+
+至此r600\_set\_default\_state函数已经全部完成，
+
+\begin{verbatim}
+r600_set_generic_scissor(pScrn, accel_state->ib, 0, 0, accel_state->dst_obj.width,
+    accel_state->dst_obj.height);
+r600_set_screen_scissor(pScrn, accel_state->ib, 0, 0, accel_state->dst_obj.width,
+    accel_state->dst_obj.height);
+r600_set_window_scissor(pScrn, accel_state->ib, 0, 0, accel_state->dst_obj.width,
+    accel_state->dst_obj.height);
+\end{verbatim}
+以上代码用于设置裁剪范围，【这里为什么会有generic screen 和window的区别】
+
+
+\subsection{Shader程序的配置}
+
+接下来进入的是r600\_vs\_setup函数对Vertex Shader的配置：
+\begin{verbatim}
+  void
+r600_vs_setup(ScrnInfoPtr pScrn, drmBufPtr ib, shader_config_t *vs_conf, uint32_t domain)
+{
+    RADEONInfoPtr info = RADEONPTR(pScrn);
+    uint32_t sq_pgm_resources;
+
+    sq_pgm_resources = ((vs_conf->num_gprs << NUM_GPRS_shift) |
+			(vs_conf->stack_size << STACK_SIZE_shift));
+
+    if (vs_conf->dx10_clamp)
+	sq_pgm_resources |= SQ_PGM_RESOURCES_VS__DX10_CLAMP_bit;
+    if (vs_conf->fetch_cache_lines)
+	sq_pgm_resources |= (vs_conf->fetch_cache_lines << FETCH_CACHE_LINES_shift);
+    if (vs_conf->uncached_first_inst)
+	sq_pgm_resources |= UNCACHED_FIRST_INST_bit;
+
+    /* flush SQ cache */
+    r600_cp_set_surface_sync(pScrn, ib, SH_ACTION_ENA_bit,
+			     vs_conf->shader_size, vs_conf->shader_addr,
+			     vs_conf->bo, domain, 0);
+
+    BEGIN_BATCH(3 + 2);
+    EREG(ib, SQ_PGM_START_VS, vs_conf->shader_addr >> 8);
+    RELOC_BATCH(vs_conf->bo, domain, 0);
+    END_BATCH();
+
+    BEGIN_BATCH(6);
+    EREG(ib, SQ_PGM_RESOURCES_VS, sq_pgm_resources);
+    EREG(ib, SQ_PGM_CF_OFFSET_VS, 0);
+    END_BATCH();
+}
+\end{verbatim}
+Shader程序配置的相关寄存器的详细信息见寄存器手册的“Shader Program Setup Registers”章节，所有Shader程序的配置都是三个寄存器：
+
+\begin{description}
+  \item[SQ\_PGM\_START\_xx] Shader程序的起始地址
+  \item[SQ\_PGM\_RESOURCES\_xx] 为Shader程序分配的资源情况
+  \item[SQ\_PGM\_CF\_OFFSET\_xx] Shader程序第一条CF指令相对Shader程序起始地址的偏移
+\end{description}
+上面代码是对Vertex Shader程序的配置，SQ\_PGM\_START\_VS寄存器中写入的是Vertex Shader程序的GPU地址，SQ\_PGM\_CF\_OFFSET\_VS写入的是0，Shader程序的第一条CF指令在程序起始地址处。SQ\_PGM\_RESOURCES\_xx寄存器中包含有NUM\_GPRS【和SQ配置处的GPR有什么关系】，必须配置足够的寄存器数目才能使程序运行，如果这里配置的寄存器数目NUM\_GPRS为5，那么Shader程序中可访问的寄存器为GPR[0...4]，如果访问GPR5，程序会运行出错。
+
+\begin{verbatim}
+  r600_ps_setup(pScrn, accel_state->ib, &ps_conf, RADEON_GEM_DOMAIN_VRAM);
+\end{verbatim}
+PS程序的配置和VS程序的配置类似，不再赘述。
+
+\subsection{资源的配置}
+这里的资源包括两部分：顶点资源和纹理资源。
+
+\subsubsection{纹理资源的配置}
+先看纹理资源的设置。这里的函数调用进入了r600\_set\_tex\_resource函数，纹理配置相关的寄存器在寄存器手册“Shader Vertex Resource Constants”章节。
+总共7个寄存器，
+
+\begin{enumerate}
+\item SQ\_VTX\_CONSTANT\_WORD0寄存器配置纹理图的维度、PITCH值以及纹理图宽度，
+\item SQ\_TEX\_RESOURCE\_WORD1记录了纹理图的高度、深度和像素格式，SQ\_TEX\_RESOURCE\_WORD2记录纹理图在显存中的地址（GPU地址），
+\item SQ\_TEX\_RESOURCE\_WORD3记录mipmap在显存中的地址，EXA驱动进行BLIT操作的时候，纹理图是以原图的大小贴上去的，实际上不使用mipmap，这个寄存器中写入的值和SQ\_TEX\_RESOURCE\_WORD2写入的值是一样的，
+\item SQ\_TEX\_RESOURCE\_WORD4配置纹理图像素格式
+\item SQ\_TEX\_RESOURCE\_WORD5 【功能暂不清楚】
+\item SQ\_TEX\_RESOURCE\_WORD6 【功能暂不清楚】
+\end{enumerate}
+
+这里需要注意到纹理资源的id问题，配置以上寄存器的时候并没有指定纹理id，寄存器地址实际上已经表明了id了，在寄存器手册上上面几个寄存器都有一个后缀\_0，这个0 就已经表明了纹理的id号了，从r600\_set\_tex\_resource函数的代码能够清楚看到这一点：
+\begin{verbatim}
+ PACK0(ib, SQ_TEX_RESOURCE + tex_res->id * SQ_TEX_RESOURCE_offset, 7);
+\end{verbatim}
+这里的寄存器地址是在SQ\_VTX\_CONSTANT\_WORD0\_0的基础上加了一个偏移，关于RESOURCE\_ID的问题
+后面设置顶点资源的时候也有，【是否应该这样理解：vs 中有多个自己的顶点资源，这些资源都被编号，ps 也有自己的顶点资源（ps 要顶点资源干嘛？还是因为为了和 texture 统一才这样做，texture 在 vs 和 ps 中都是可用的，可是 fs 呢，fs 为什么会有自己的资源），也被编号，并且这些资源可以共享，比如一个 tex 资源在 vs 中使用，也在 ps 中使用，则在 ps 中一个编号为 0 的 tex 资源，在 vs中有一个编号为 160 的 tex 资源，都是指向同一个 tex 资源？？】
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{resource}\\
+  \caption{resource id号分布图}\label{resource}
+\end{figure}
+
+\begin{verbatim}
+    SQ_TEX_RESOURCE = SQ_TEX_RESOURCE_WORD0_0,/* 160 PS, 160 VS, 16 FS, 160 GS */
+    SQ_TEX_RESOURCE_ps_num  = 160,
+    SQ_TEX_RESOURCE_vs_num  = 160,
+    SQ_TEX_RESOURCE_fs_num  = 16,
+    SQ_TEX_RESOURCE_gs_num  = 160,
+    SQ_TEX_RESOURCE_all_num  = 496,
+    SQ_TEX_RESOURCE_offset   = 28,
+    SQ_TEX_RESOURCE_ps       = 0,
+    SQ_TEX_RESOURCE_vs  = SQ_TEX_RESOURCE_ps + SQ_TEX_RESOURCE_ps_num,
+    SQ_TEX_RESOURCE_fs  = SQ_TEX_RESOURCE_vs + SQ_TEX_RESOURCE_vs_num,
+    SQ_TEX_RESOURCE_gs  = SQ_TEX_RESOURCE_fs + SQ_TEX_RESOURCE_fs_num,
+\end{verbatim}
+
+注意到几个宏定义，SQ\_TEX\_RESOURCE\_WORD0\_0为这一系列寄存器的起始地址，每一个资源对应7个寄存器，故偏移量为7*4 = 28（SQ\_TEX\_RESOURCE\_offset）。
+PS的第一块纹理的id号为0，写入寄存器地址为0x38000~0x38018，PS第二块纹理的id号为1，写入寄存器地址为0x38000+28 ~ 0x38018+28，VS的第一块纹理的id号为160，写入的寄存器地址为0x38000+28*160 ~ 0x38018+28*160。
+
+接下来是设置采样器，可以参考寄存器手册上的介绍，这里不详细描述。
+
+
+后面还有设置顶点资源的代码test\_r600\_set\_vtx\_resource。
+
+
+\subsubsection{顶点资源和索引的配置}
+
+在R5xx显卡中，输入数据的属性可以是按照向量的方式写入到VAP\_PORT\_DATA寄存器然后到达IVM中，顶点位置和其他属性数据的排列方式可以是任意的，驱动程序只需要通过VAP\_VTX\_SIZE寄存器告知硬件顶点数据的大小。也可以使用索引方式，将顶点数据放置到VRAM的某一个位置，然后通过VAP\_PORT\_IDX寄存器将索引写入，到显卡上。
+在R6xx显卡上只支持索引模式，用户必须先将顶点数据放置到vertex buffer中，vertex buffer是驱动从GTT上分配出来的用于放置顶点数据的一片内存，然后将索引写入显卡，因此vertex shader的输入都是索引，因此在vertex shader中必须调用事先编程好的fetch shader或者直接使用取顶点数据指令将顶点位置和顶点属性取出来【从主存DMA到显卡上】【细节还需要详细理解】，然后才能对这些数据进行处理【R3xx索引模式下是似乎不需要这样做，似乎无论使用索引模式还是立即模式，硬件都会将数据准备好，因此vertex shader看到的就是顶点数据，确认？？】。
+和R5xx显卡一样，R6xx显卡输入的顶点属性数据顺序也是可以由驱动自己定义的，在使用fetch shader的情况下，必须编程一个semantic table告知硬件顶点属性的排列顺序【semantic table如何编程】，如果直接是在vertex shader程序中取顶点数据，则编写vertex shader的用户或者编译器知道数据的格式，不需要semantic table【参考Radeon R6xx/R7xx Acceleration  2.5 Shader Linkage】。
+1）EXA驱动中关于vertex buffer的分配
+R600DoPrepareCopy中有使用vertex buffer的分配过程，在尚未分配vertex buffer的时候，vertex buffer按照如下过程分配：
+
+
+R600DoPrepareCopy $\rightarrow$ radeon\_vbo\_check $\rightarrow$ r600\_vb\_no\_space \\ $\rightarrow$ radeon\_vbo\_get $\rightarrow$ radeon\_vbo\_get\_bo
+
+最后的分配过程是这样的
+\begin{verbatim}
+	    dma_bo->bo = radeon_bo_open(info->bufmgr, 0, VBO_SIZE,
+                    0, RADEON_GEM_DOMAIN_GTT, 0);
+\end{verbatim}
+这里使用的是GTT内存。
+
+R600Copy函数调用了R600AppendCopyVertex，R600AppendCopyVertex函数中表明了vertex buffer的使用过程：
+\begin{verbatim}
+
+static void
+R600AppendCopyVertex(ScrnInfoPtr pScrn, int srcX, int srcY, int dstX, int dstY, int w, int h)
+{
+    float *vb;
+
+    vb = radeon_vbo_space(pScrn, 16);
+
+    vb[0] = (float)dstX;
+    vb[1] = (float)dstY;
+    vb[2] = (float)srcX;
+    vb[3] = (float)srcY;
+
+    vb[4] = (float)dstX;
+    vb[5] = (float)(dstY + h);
+    vb[6] = (float)srcX;
+    vb[7] = (float)(srcY + h);
+
+    vb[8] = (float)(dstX + w);
+    vb[9] = (float)(dstY + h);
+    vb[10] = (float)(srcX + w);
+    vb[11] = (float)(srcY + h);
+
+    radeon_vbo_commit(pScrn);
+}
+\end{verbatim}
+
+radeon\_vbo\_space(pScrn, 16)从vertex buffer中获取16【应该是出于对齐的原因】个dword大的内存并获取到指向申请到的这块内存的指针（具体过程大致是如果vertex buffer不够用了，就重新申请，如果还没有做映射，则做一次映射，然后根据整个bo的起始映射地址加上偏移得到可以使用的vertex buffer的地址）即上面代码中的vb指针，然后填上顶点数据。
+这里是要做blit操作，源内存中的内容被看做是纹理，在目的地址处绘制矩形，然后将纹理应用到这个矩形上【这里是绘制矩形，但是只是用了三个顶点的坐标，似乎是自动计算了第四个坐标，为了避免误解后续我们写dfb驱动的时候使用改成绘制QUAD\_LIST这样就可以显示的指定完整的四个坐标】。
+radeon\_vbo\_commit(pScrn)计算了一下当前剩余的空间，并将指针移动到剩余的空间上（有点类似前面的radeon\_ring\_lock和radeon\_ring\_commit的过程）。
+
+R600DoCopy函数按照如下的调用顺序完成硬件顶点资源的设置：
+R600DoCopy$\rightarrow$r600\_finish\_op$\rightarrow$set\_vtx\_resource，
+
+\begin{verbatim}
+    /* Vertex buffer setup */
+    accel_state->vb_size = accel_state->vb_offset - accel_state->vb_start_op;
+    vtx_res.id              = SQ_VTX_RESOURCE_vs;
+    vtx_res.vtx_size_dw     = vtx_size / 4;
+    vtx_res.vtx_num_entries = accel_state->vb_size / 4;
+    vtx_res.mem_req_size    = 1;
+    vtx_res.vb_addr         = accel_state->vb_mc_addr + accel_state->vb_start_op;
+    vtx_res.bo              = accel_state->vb_bo;
+\end{verbatim}
+
+这里的id号和纹理资源的id号类似。EXA驱动里面只有一个顶点资源，被编号为SQ\_VTX\_RESOURCE\_vs （160），顶点大小为16 （x、y 坐标加上s、t纹理坐标共4x4=16 字节）。vtx\_res.vb\_addr为vertex buffer的地址。【vtx\_res.vtx\_num\_entries似乎有点问题】
+
+将上面这些信息设置到硬件里
+\begin{verbatim}
+set_vtx_resource(pScrn, accel_state->ib, &vtx_res, RADEON_GEM_DOMAIN_GTT);
+void set_vtx_resource(ScrnInfoPtr pScrn, drmBufPtr ib, vtx_resource_t *res, uint32_t domain)
+{
+    RADEONInfoPtr info = RADEONPTR(pScrn);
+    uint32_t sq_vtx_constant_word2;
+
+    sq_vtx_constant_word2 = ((((res->vb_addr) >> 32) & BASE_ADDRESS_HI_mask) |
+                 ((res->vtx_size_dw << 2) << SQ_VTX_CONSTANT_WORD2_0__STRIDE_shift) |
+                 (res->format << SQ_VTX_CONSTANT_WORD2_0__DATA_FORMAT_shift) |
+                 (res->num_format_all << SQ_VTX_CONSTANT_WORD2_0__NUM_FORMAT_ALL_shift) |
+                 (res->endian << SQ_VTX_CONSTANT_WORD2_0__ENDIAN_SWAP_shift));
+    if (res->clamp_x)
+        sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__CLAMP_X_bit;
+
+    if (res->format_comp_all)
+        sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__FORMAT_COMP_ALL_bit;
+
+    if (res->srf_mode_all)
+        sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__SRF_MODE_ALL_bit;
+
+    BEGIN_BATCH(9 + 2);
+    PACK0(ib, SQ_VTX_RESOURCE + res->id * SQ_VTX_RESOURCE_offset, 7);
+    E32(ib, res->vb_addr & 0xffffffff);             // 0: BASE_ADDRESS
+    E32(ib, (res->vtx_num_entries << 2) - 1);           // 1: SIZE
+    E32(ib, sq_vtx_constant_word2); // 2: BASE_HI, STRIDE, CLAMP, FORMAT, ENDIAN
+    E32(ib, res->mem_req_size << MEM_REQUEST_SIZE_shift);       // 3: MEM_REQUEST_SIZE ?!?
+    E32(ib, 0);                         // 4: n/a
+    E32(ib, 0);                         // 5: n/a
+    E32(ib, SQ_TEX_VTX_VALID_BUFFER << SQ_VTX_CONSTANT_WORD6_0__TYPE_shift);    // 6: TYPE
+    RELOC_BATCH(res->bo, domain, 0);
+    END_BATCH();
+}
+\end{verbatim}
+
+以上写的是Radeon R6xx/R7xx 3D Register Reference Guide第6部分 Shader Vertex Resource Constants的几个寄存器
+\begin{verbatim}
+SQ_VTX_CONSTANT_WORD0_0		0x38000
+SQ_VTX_CONSTANT_WORD1_0		0x38004
+SQ_VTX_CONSTANT_WORD2_0		0x38008
+SQ_VTX_CONSTANT_WORD3_0		0x3800c
+SQ_VTX_CONSTANT_WORD6_0		0x38018
+\end{verbatim}
+往第0个寄存器中写入的是vertex buffer地址（GPU虚拟地址）的高32位，往第1 个寄存器里面写入的全部顶点占用的内存大小（以DWORD计），往第2个寄存器中写入的是vertex buffer地址的低32位、stride值、endian等信息。往第3个寄存器写入的值暂不清楚其含义。【手册并未给出】。中间还有两个寄存器未定义，编程的时候需要往这两个寄存器里面写0。
+
+\subsubsection{常量资源的配置}
+Copy过程中没有使用常量资源，但是Solid过程使用了常量，将颜色作为常量传递给Shader。
+
+颜色应该是作为顶点属性放置在顶点输入数据里面的，但是由于Solid操作整个矩形内填充的是同一种颜色，因此可以将颜色作为常量传递给Shader。
+
+关于如何设置常量，以及常量如何被访问，读者可以参考EXA驱动中的r600\_set\_alu\_consts函数和Solid的Shader程序代码。
+
+
+\subsection{输出}
+
+\begin{verbatim}
+r600_set_render_target(pScrn, accel_state->ib, &cb_conf, accel_state->dst_o
+\end{verbatim}
+
+render target称为渲染目标，在早期的显卡上，渲染的结果只能输出在显示区域上，后来的显卡引入了Multiple render target的概念，多目标渲染，即渲染结果可以同时输出到显存的多个位置，在R600上最多可以配置8个render target，也就是说一次渲染的结果可以输出到显存上的最多8个不同的位置。
+
+这部相关的寄存器在寄存器手册"Color Buffer Registers"章节，这里的很多寄存器都有八套，目前我们只使用一个render target，只是用于显示输出。
+
+首先关心的是输出地址，EXA驱动向CB\_COLOR0\_BASE寄存器中写入的就是framebuffer的地址，
+
+CB\_COLOR0\_SIZE寄存器中存放的是Render target的大小，这里的大小是按照TILE来计算的，TILE大小为8*8，CB\_COLOR0\_SIZE寄存器PITCH\_TILE\_MAX域放置的是一行的TILE数目减1（width/8），SLICE\_TILE\_MAX域存放的是整个render target的tile数目减1（width*height/(8*8) -1）。
+
+CB\_COLOR\_INFO寄存器配置render target的格式，目前比较重要的位有：
+ENDIAN 指定输出是否进行大小端转换，ARRAY\_MODE指定render target的tiling格式，FORMAT指定输出像素的格式。
+\\ \\ \\
+
+总体上看，从图形处理流水线的源头开始，需要准备好vertex buffer和index，在立即模式下，index可以直接编程在命令中，通过配置寄存器告诉GPU vertex buffer的位置，在启动GPU流水线之前，还需要将vertex shader程序和pixel shader程序加载到vram 中，并通过配置寄存器告示GPU shader程序的位置，在vertex shader和pixel shader之间还需要配置光栅化部件以及semantic table，在pixel shader的输出端配置render target，这样整个GPU的编程就算完成了。
+
+GPU流水线启动之后，就按照“R6xx显卡核心图形处理流水线”章节描述的过程处理数据，并将最后的结果输出到render target中。
+
+\section{中间语言}
+
+GLSL语言（以下高级着色语言就是指GLSL）是语法类似C的高级语言，在GLSL规范中，GLSL语言被先翻译成教低级的类汇编语言（ILSL，当前mesa中是tgsi？？，以下简称低级着色语言）【查阅此处以确定该信息，tgsi是否和该处处于同样的地位，如果是，后续介绍了arbvp arbfp之后请添加材料说明tgsi】，然后被翻译成硬件特定的指令集。OpenGL体系管理委员会于2002年6月和2002年9月分别通过了两个官方扩展：ARB\_VERTEX\_PROGRAM与ARB\_FRAGMENT\_PROGRAM来统一对低级着色语言的支持，GLSL语言被编译成针对这两个扩展的低级着色语言（因此这两个扩展可以看成是GLSL运行的虚拟机），显卡厂商的驱动将低级着色语言翻译成GPU指令。这两个扩展的1.0版本分别是arbvpl0和arbfpl0，这两个扩展的2.0版本分别是arbvp20和arbfp2。
+
+目前，在Mesa上，GLSL首先被编译器翻译成tgsi中间语言，然后显卡特定的驱动将这些tgsi语言的代码编译成GPU指令，这个过程如图\ref{mesapipeline}示。
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{mesapipeline}\\
+  \caption{Mesa GLSL代码翻译过程}\label{mesapipeline}
+\end{figure}
+
+
+\section{R6xx显卡核心指令集（多添加内容还是精简？？）}
+在主机（CPU）上运行的程序都是按照代码的先后顺序顺序执行的，比如下面这样的代码：
+\footnote{此处添加代码}\begin{verbatim}
+  这里插入一段X86汇编指令
+\end{verbatim}
+
+在CPU上运行的程序，所有的访存指令和运算指令按照代码的堆叠顺序执行（不考虑指令集并行），如果有跳转指令则跳转到相应位置。
+
+但是GPU主要用于运算，没有包含复杂的控制程序，因此R600 Shader程序和CPU程序比较显得比较简陋，必须有专门的代码指示程序的执行顺序，并且指示程序运行顺序的指令（Control Flow 指令，后面称为CF 指令）、运算指令（后面称ALU指令）和访存指令（在R600 GPU 中称为Fetch 指令）必须按照类别存放，同一种类型的指令放在一起，不同类型的指令按照某种顺序存放，同一类型的指令（不包括CF指令）构成一个Clause。图\ref{shaderlayout}显示了R600 GPU Shader程序在内存中存放的形式。
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{shaderlayout}\\
+  \caption{R600 Shader程序结构}\label{shaderlayout}
+\end{figure}
+
+R600的指令包含Control Flow（后面简称CF）指令，ALU（运算）指令，Vertex Fecth （取顶点）指令和Texture Fetch（取纹理）指令。指令的格式称为Microde Format。
+
+每一个Shader程序（Pixel Shader或者Vertex Shader）包含两部分，一部分是CF指令，另一部分是Clause。 这些Clause由CF 指令初始化（或者不恰当的理解成Clause 由CF指令调用）。
+
+R600的每一条指令的格式（为了保持和手册上术语的一致，后面将使用Microcode Format这个词）都包含了2 个或者4个DWORD（CF 和ALU为2个DWORD，Vertex Fetch 和Texture Fetch 为4个DWORD），这些Microcode Format可以在《R600 Family Instruction Set Architecture》手册上查阅到。
+
+\subsection{Vertex Shader程序实例}
+下面使用一个具体的实例来说明，下面的程序来自我们的R600 Direct FB 驱动BLT过程的Vertex Shader程序（请参考后续章节），按照图\ref{shaderlayout} 的要求，这段程序被分成了两部分，第一部分是CF指令，共四条指令，指令（0）~指令（3）（指令（3）为空指令，用于对齐），第二部分为取顶点指令，共两条指令，指令（4）~ 指令（5），分别用于取顶点位置坐标和纹理坐标。
+
+\begin{verbatim}
+        CF_DWORD0(ADDR(4)),                                // （0） addr 0
+        CF_DWORD1(POP_COUNT(0),
+                CF_CONST(0),
+                COND(SQ_CF_COND_ACTIVE),
+                I_COUNT(2),                                // 2 instructions
+                CALL_COUNT(0), END_OF_PROGRAM(0), VALID_PIXEL_MODE(0),
+                CF_INST(SQ_CF_INST_VTX), WHOLE_QUAD_MODE(0), BARRIER(1)),
+
+        CF_ALLOC_IMP_EXP_DWORD0(ARRAY_BASE(CF_POS0),      // （1） addr 1
+                TYPE(SQ_EXPORT_POS), RW_GPR(1), RW_REL(ABSOLUTE),
+                INDEX_GPR(0), ELEM_SIZE(0)),
+        CF_ALLOC_IMP_EXP_DWORD1_SWIZ(SRC_SEL_X(SQ_SEL_X), SRC_SEL_Y(SQ_SEL_Y),
+                SRC_SEL_Z(SQ_SEL_Z), SRC_SEL_W(SQ_SEL_W), R6xx_ELEM_LOOP(0),
+                BURST_COUNT(0), END_OF_PROGRAM(0), VALID_PIXEL_MODE(0),
+                CF_INST(SQ_CF_INST_EXPORT_DONE), WHOLE_QUAD_MODE(0), BARRIER(1)),
+
+        CF_ALLOC_IMP_EXP_DWORD0(ARRAY_BASE(0),           //（2） addr 2
+                TYPE(SQ_EXPORT_PARAM), RW_GPR(0), RW_REL(ABSOLUTE),
+                INDEX_GPR(0), ELEM_SIZE(0)),
+        CF_ALLOC_IMP_EXP_DWORD1_SWIZ(SRC_SEL_X(SQ_SEL_X),
+                SRC_SEL_Y(SQ_SEL_Y), SRC_SEL_Z(SQ_SEL_Z),
+                SRC_SEL_W(SQ_SEL_W), R6xx_ELEM_LOOP(0),
+                BURST_COUNT(0), END_OF_PROGRAM(1), VALID_PIXEL_MODE(0),
+                CF_INST(SQ_CF_INST_EXPORT_DONE), WHOLE_QUAD_MODE(0),
+                BARRIER(0)),
+
+        VTX_DWORD_PAD,                                   //（3） addr 3
+        VTX_DWORD_PAD,
+\end{verbatim}
+
+\begin{verbatim}
+        VTX_DWORD0(VTX_INST(SQ_VTX_INST_FETCH),          //（4） addr 4
+                FETCH_TYPE(SQ_VTX_FETCH_VERTEX_DATA), FETCH_WHOLE_QUAD(0),
+                BUFFER_ID(0), SRC_GPR(0), SRC_REL(ABSOLUTE),
+                SRC_SEL_X(SQ_SEL_X), MEGA_FETCH_COUNT(16)),
+        VTX_DWORD1_GPR(DST_GPR(1), DST_REL(0), DST_SEL_X(SQ_SEL_X),
+                DST_SEL_Y(SQ_SEL_Y), DST_SEL_Z(SQ_SEL_0),
+                DST_SEL_W(SQ_SEL_1), USE_CONST_FIELDS(0),
+                DATA_FORMAT(FMT_32_32_FLOAT),
+                NUM_FORMAT_ALL(SQ_NUM_FORMAT_SCALED),
+                FORMAT_COMP_ALL(SQ_FORMAT_COMP_SIGNED),
+                SRF_MODE_ALL(SRF_MODE_ZERO_CLAMP_MINUS_ONE)),
+        VTX_DWORD2(OFFSET(0),
+#ifdef __BIG_ENDIAN
+                ENDIAN_SWAP(SQ_ENDIAN_8IN32),
+#else
+                ENDIAN_SWAP(SQ_ENDIAN_NONE),
+#endif
+                CONST_BUF_NO_STRIDE(0),
+                MEGA_FETCH(1)),
+        VTX_DWORD_PAD,
+
+        VTX_DWORD0(VTX_INST(SQ_VTX_INST_FETCH),          //（5）addr 6
+                FETCH_TYPE(SQ_VTX_FETCH_VERTEX_DATA), FETCH_WHOLE_QUAD(0),
+                BUFFER_ID(0), SRC_GPR(0), SRC_REL(ABSOLUTE),
+                SRC_SEL_X(SQ_SEL_X), MEGA_FETCH_COUNT(8)),
+        VTX_DWORD1_GPR(DST_GPR(0), DST_REL(0),
+                DST_SEL_X(SQ_SEL_X), DST_SEL_Y(SQ_SEL_Y),
+                DST_SEL_Z(SQ_SEL_0), DST_SEL_W(SQ_SEL_1),
+                USE_CONST_FIELDS(0), DATA_FORMAT(FMT_32_32_FLOAT),
+                NUM_FORMAT_ALL(SQ_NUM_FORMAT_SCALED),
+                FORMAT_COMP_ALL(SQ_FORMAT_COMP_SIGNED),
+                SRF_MODE_ALL(SRF_MODE_ZERO_CLAMP_MINUS_ONE)),
+        VTX_DWORD2(OFFSET(8),
+#ifdef __BIG_ENDIAN
+                ENDIAN_SWAP(SQ_ENDIAN_8IN32),
+#else
+                ENDIAN_SWAP(SQ_ENDIAN_NONE),
+#endif
+                CONST_BUF_NO_STRIDE(0),
+                MEGA_FETCH(0)),
+        VTX_DWORD_PAD,
+\end{verbatim}
+
+上面程序的运行过程如图\ref{blitshader}示，图中标记了两个线程，此刻两个线程正在对两个顶点数据进行处理。下面结合这张图详细描述程序运行的过程。
+
+\begin{figure}[!h]
+  \centering
+  % Requires \usepackage{graphicx}
+  \subfloat[运行程序之前]{\includegraphics[scale=0.92]{blitshader1}\label{blitshader1}}\vspace{0pt}
+  \subfloat[运行程序之后]{\includegraphics[scale=0.92]{blitshader2}\label{blitshader2}}\vspace{0pt} %\hspace{30pt}
+  \subfloat[运行程序之后]{\includegraphics{blitshader3}\label{blitshader3}}%\vspace{0pt}
+  \caption{程序运行过程}\label{blitshader}
+\end{figure}
+
+在程序运行之前，顶点数据的地址已经放在通用寄存器的GPR0中（输入数据的寄存器配置【查阅此处】），见图\ref{blitshader1}。
+
+\begin{enumerate}
+  \item CF指令（0）\\ 指令（0）的ADDR位指示程序从地址4处的指令（指令（4））开始运行，I\_COUNT位指示共执行2条指令（指令（4）和指令（5）），执行完后回到指令（0），指令（0）的END\_OF\\\_PROGRAM位表明程序还没有结束，继续执行指令（1），
+  \item Vertex Fetch Clause\\ CF的第一条指令指明程序会从第指令（4）处开始执行，指令（4）和指令（5）构成一个Vertex Fetch Clause，两条指令一起完成取顶点数据，这里是BLT操作，顶点数据包括顶点的位置坐标和纹理坐标。由于是2D操作，因此这里的坐标的有效分量只有两个。\\ 指令（4）的VTX\_INST位表明改指令是一条取数据的指令，从BUFFER\_ID为0 的内存处取顶点（FETCH\_TYPE）数据，SRC\_GPR为索引号所在的寄存器位置，一次取的数据量为16字节（一个四元向量的大小），取出来的数据被放置在编号为1的寄存器中（DST\_GPR），DST\_SEL\_X(SQ\_SEL\_X)表明取出来的向量的X分量放置到目的寄存器第一个DWORD位置处，Y分量按照相同的方法放置（DST\_SEL\_Y(SQ\_SEL\_Y)），目的寄存器的第三个DWORD 处被置为0，第四个DWORD 处被置为1（可以使用0,1或者0.5【确认】）。指令（5）和指令（4）类似，由于所有顶点属性数据已经取完，因此原来存在于GPR0 的地址不再需要，可以覆盖掉。\\
+      当然其实我们使用一条指令就可以将X、Y、S和T四个分量全部取出来，这里为了演示寄存器的使用所以取了两次。
+  \item CF指令（1）和指令（2）\\ 这是两条输出指令，指令所做的工作如图\ref{blitshader3}示，指令（1）用于输出顶点的位置坐标（TYPE(SQ\_EXPORT\_POS)），这条指令从GPR1（RW\_GPR(1)）中读取数据，将数据输出到Position Buffer 0 中（ARRAY\_BASE(CF\_POS0)）。输出的时候还有一个Swizzle操作，这条指令的Swizzle操作没有变换向量各个分量。
+        【此处介绍Swizzle操作】
+
+  指令（1）的END\_OF\_PROGRAM 标志表明程序还没有结束，因此继续执行指令（2），指令（2）的END\_OF\_PROGRAM位表明程序至此结束（后续如果还写有指令将不会执行）。
+
+\end{enumerate}
+
+\subsection{Pixel Shader程序的实例}
+
+\begin{verbatim}
+        CF_DWORD0(ADDR(2)),      // 指令（0）  addr 0
+        CF_DWORD1(POP_COUNT(0),
+                CF_CONST(0),
+                COND(SQ_CF_COND_ACTIVE),
+                I_COUNT(1),
+                CALL_COUNT(0),
+                END_OF_PROGRAM(0),
+                VALID_PIXEL_MODE(0),
+                CF_INST(SQ_CF_INST_TEX),
+                WHOLE_QUAD_MODE(0),
+                BARRIER(1)),
+
+        CF_ALLOC_IMP_EXP_DWORD0(ARRAY_BASE(CF_PIXEL_MRT0),//指令（1）addr 1
+                TYPE(SQ_EXPORT_PIXEL),
+                RW_GPR(0x6),         // i changed it to 0x6
+                RW_REL(ABSOLUTE),
+                INDEX_GPR(0),
+                ELEM_SIZE(1)),
+        CF_ALLOC_IMP_EXP_DWORD1_SWIZ(SRC_SEL_X(SQ_SEL_X),
+                SRC_SEL_Y(SQ_SEL_Y),
+                SRC_SEL_Z(SQ_SEL_Z),
+                SRC_SEL_W(SQ_SEL_W),
+                R6xx_ELEM_LOOP(0),
+                BURST_COUNT(1),
+                END_OF_PROGRAM(1),
+                VALID_PIXEL_MODE(0),
+                CF_INST(SQ_CF_INST_EXPORT_DONE),
+                WHOLE_QUAD_MODE(0),
+                BARRIER(1)),
+
+        TEX_DWORD0(TEX_INST(SQ_TEX_INST_SAMPLE),  // 指令（2） addr 2
+                BC_FRAC_MODE(0),
+                FETCH_WHOLE_QUAD(0),
+                RESOURCE_ID(0),
+                SRC_GPR(0),
+                SRC_REL(ABSOLUTE),
+                R7xx_ALT_CONST(0)),
+        TEX_DWORD1(DST_GPR(0x6),  //  i changed it to 0x6
+                DST_REL(ABSOLUTE),
+                DST_SEL_X(SQ_SEL_X), /* R */
+                DST_SEL_Y(SQ_SEL_Y), /* G */
+                DST_SEL_Z(SQ_SEL_Z), /* B */
+                DST_SEL_W(SQ_SEL_W), /* A */
+                LOD_BIAS(0),
+                COORD_TYPE_X(TEX_UNNORMALIZED),
+                COORD_TYPE_Y(TEX_UNNORMALIZED),
+                COORD_TYPE_Z(TEX_UNNORMALIZED),
+                COORD_TYPE_W(TEX_UNNORMALIZED)),
+        TEX_DWORD2(OFFSET_X(0),
+                OFFSET_Y(0),
+                OFFSET_Z(0),
+                SAMPLER_ID(0),
+                SRC_SEL_X(SQ_SEL_X),
+                SRC_SEL_Y(SQ_SEL_Y),
+                SRC_SEL_Z(SQ_SEL_0),
+                SRC_SEL_W(SQ_SEL_1)),
+        TEX_DWORD_PAD,
+\end{verbatim}
+
+这里总共三条指令，其中指令（0）和指令（1）是两条CF指令，指令（2）是一条取纹理的指令。
+
+指令（0）表明程序将从addr为2的指令（2）处开始执行，指令（2）是一条texture fetch 指令，这条指令根据GPR0中给出的纹理坐标（SRC\_GPR(0)，根据前面semantic的配置，被差值的纹理坐标存放在GPR0中）从id号为0的纹理资源中取出纹理值，放入到GPR6中（DST\_GPR(0x6)）。
+
+取纹理操作完成后，执行指令（1），指令（1）是一条输出指令，将取到的纹理直接放到Render target 0（ARRAY\_BASE(CF\_PIXEL\_MRT0)）上去，
+
+如果是OpenGL程序源写GLSL程序，和上面程序功能类似的代码应该是这样的：
+
+
+
+
+\ifx \allfiles \undefined
+\end{document}
+\fi

@@ -1,0 +1,71 @@
+\documentclass[a4paper]{book}
+%\usepackage[paperwidth=145mm,paperheight=99.5mm,text={134mm,120mm},left=6mm,top=-7mm]{geometry} % 页面设置
+\usepackage[left=30mm, right=30mm,top=30mm]{geometry} % 页面设置
+\usepackage{comment}
+%\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{ctexcap}
+\usepackage[labelfont=bf,labelsep=quad]{caption}
+  \DeclareCaptionFont{kai}{\kaishu}
+  \captionsetup{textfont=kai}
+\usepackage{graphicx,floatrow,subfig}
+\usepackage{multirow}
+
+\graphicspath{{./}{fig/}}
+
+\def \allfiles{}
+%\usepackage{ctexcap}
+%  \CTEXsetup[format+={\small}]{chapter}
+%  \CTEXsetup[nameformat={\large\bf},titleformat+={\large},afterskip={23pt}]{chapter}
+%  \CTEXsetup[nameformat={\normalsize\bf},titleformat+={\normalsize}]{section}
+
+\renewcommand{\rmdefault}{ptm}
+
+%\renewcommand\contentsname{目 录}
+\numberwithin{equation}{section}
+
+\begin{document}
+
+\title{\textbf{Linux环境下的图形显示原理（？？）}}
+\date{}
+\author{\\[2pt]显示组}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\begin{sloppypar}
+\input{ch1}
+\newpage
+
+\input{ch2}
+\newpage
+
+\input{ch3}
+\newpage
+
+
+\newpage
+\input{ch4}
+
+\newpage
+
+\begin{appendix}
+\chapter{EXA驱动}
+\chapter{Mesa3D简介}
+\chapter{Libdrm库介绍和编程}
+\end{appendix}
+
+
+\begin{thebibliography}{99}
+
+\bibitem{AMD001} AMD, \emph{Radeon R6xx/R7xx Acceleration},(2009)
+
+\bibitem{AMD002} AMD, \emph{R600-Family Instruction Set Architecture},(2009)
+
+\bibitem{AMD003} AMD, \emph{}
+\end{thebibliography}
+
+\end{sloppypar}
+\end{document}

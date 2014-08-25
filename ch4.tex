@@ -1,0 +1,627 @@
+% chapx.tex
+\ifx \allfiles \undefined
+\documentclass[a4paper]{article}
+%\usepackage[paperwidth=145mm,paperheight=99.5mm,text={134mm,120mm},left=6mm,top=-7mm]{geometry} % 页面设置
+\usepackage[left=30mm, right=30mm,top=30mm]{geometry} % 页面设置
+\usepackage{comment}
+%\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{ctexcap}
+\usepackage[labelfont=bf,labelsep=quad]{caption}
+  \DeclareCaptionFont{kai}{\kaishu}
+  \captionsetup{textfont=kai}
+\usepackage{graphicx,floatrow,subfig}
+
+\graphicspath{{./}{fig/}}
+
+\begin{document}
+\title{DirectFB图形系统和图形驱动编写}
+\author{向侃 赵自成}
+\date{}\maketitle
+\else
+\chapter{DirectFB图形系统和图形驱动编写}
+
+\fi
+
+\section{DirectFB图形系统分析？？（本章详细分析）}
+
+\begin{verbatim}
+【本节内容完全来自http://blog.csdn.net/absurd/article/details/2596080，可参考这部分内容阅读代码】
+
+事实上我对DirectFB的理解是比较肤浅的，几年前的确花了一些时间研究去DirectFB的实现，但只是集中在一部分功能的代码上。后来GUI(DirectFB/GTK)由一位同事接手了，我就没有花太多时间在上面了。可能是因为前面写过几篇关于DirectFB的文章，结果还真有不少网友把我当专家了。答应过一位网友写篇介绍DirectFB运行机制的文章，这个周末花了点时间写了这篇短文，放在这里供有需要的朋友参考。文中若有不当之处，望大家不吝指正。
+
+DirectFBInit 这个函数其实并没有做什么特殊的初始化工作，只是加载了配置文件而已。加载的顺序如下，重复的配置内容以后加载的为优先：
+
+系统全局配置文件，老版本文件为/etc/directfbrc，新版本文件为SYSCONFDIR"/directfbrc"
+用户全局配置文件，文件为~/.directfbrc
+(系统)应用程序特定的配置文件 SYSCONFDIR"/directfbrc.应用程序名"
+(用户)应用程序特定的配置文件 ~/.directfbrc.应用程序名
+命令行参数
+DirectFBCreate 真正的初始化是在这里面进行的，严格的说这也不叫初始化了，因为这是创建DirectFB对象，对象当然是可以创建/销毁多次，而初始化通常只能做一次了。考虑到在一个进程中DirectFBCreate通常只会调一次，进程退出时才销毁，所以我们还是把它看作初始化。现在我们来看看DirectFBCreate做了什么: direct_initialize　direct是一个基础库，这个函数主要做了两件事情：
+初始化log。 direct实现了三种LOG方法，第一种是输出到stderr上，第二种是输出到指定的文件里，第三种是通过UDP输出到网络上。这种方法对嵌入式环境是特别有用的，因为很多时候没有机会看终端上的信息。
+安装信号处理函数。主要是针对像SIGTERM这类会导致程序退出的SIGNAL，DirectFB希望在程序退出之前做些善后处理。值得学习的是direct是一个基础库，它不能直接调用上层组件的函数，所以提供了direct_signal_handler_add之类的函数让上层组件注册/注销回调函数，避免了下层函数与上层函数的耦合。
+dfb_core_create 核心组件初始化。核心组件都是以共享库形式存在的，这里主要是加载这些共享库，并调用相应的初始化函数。为了避免框架与组件之间的耦合，DirectFB是通过遍历目录去加载的，删除不必要插件可以提高加载速度。
+dfb_system_lookup 其实system在这里并没有表示出它真正的意义，这里的system实际上是指显示方式，比如基于framebuffer的fbdev和基于XWindow的x11等等。它先调用direct_modules_explore_directory在找出目录中所有的system实现，然后与配置中指定的名称匹配，找到指定的system后调用GetSystemInfo得到一些system信息。
+direct_find_best_memcpy 因为GUI里面memcpy的效率对系统整体的效率影响很大，所以DirectFB针对不同的系统实现了一些优化过的memcpy函数。
+fusion_enter 初始化fusion，fusion是用于进程间通信的机制，/dev/fusion/n是用于进程间消息传递的文件,每个进程都有这样一个文件。在本函数中会打开这个文件，并用ioctrl发送FUSION_ENTER命令。随后映射/初始共享内存。最后创建消息分发线程，其线程入口函数为fusion_dispatch_loop。
+fusion_arena_enter 我没有直接用过arena，它的主要功能似乎只是对共享数据的管理，通过一个名称与一块数据关联起来，放到hash表中，每个进程都可以通过名字取相应的数据。
+IDirectFB_Construct构造一个IDirectFB对象。
+通过dfb_layer_at_translated获取primary layer.
+通过dfb_layer_get_primary_context获取primary layer, CoreLayerContext里面最重要的东西可能就是CoreWindowStack，CoreWindowStack管理着所有窗口，对应用程序产生直接的影响。
+通过dfb_layer_context_windowstack获取窗口栈。
+初始化IDirectFB接口的虚函数，让函数指针指到具体的函数上。随便说一句，最近还有一些冒充专家的外行说C语言只能按面向过程的方法开发软件，甚至说C语言只适合开发小项目，真是无语了。建议他们看看DirectFB的代码，update一下他们陈旧的观念。
+如果是master进程，还要调用InitLayers, 它的主要功能是根据配置初始化layer，包括显示区域大小 ，调色板，透明色，窗口栈的显示区域和绘制背景(背景图片或者颜色填充）等等。
+dfb_wm_post_init如果是master进程，还要执行窗口栈的PostInit，我看了几个窗口管理器的实现，这个函数都是空的。 dfb_core_activate初始化完成后激活dfb_core。这也是很重要的，可以避免初始化完成之前dfb_core被其它线程使用。 IDirectFB_CreateInputEventBuffer这个函数创建一个EventBuffer，通过EventBuffer可以获取输入事件，不过通常应该通过Window去创建EventBuffer，那样可以收到更高层的事件。InputEventBuffer实际上主要是对InputDevice的包装，不要小看这个包装，包装后有三个重要变化：
+Event被缓冲,不用担心事件丢失或者阻塞驱动程序。包装前的InputDevice事件是来一个处理一个，包装后则是先放到缓冲中，然后一个一个的处理。
+由被动变为主动，更符合GUI的事件处理的惯例。包装前是上层设置回调函数，在事件到来时回调函数被下层调用，包装后是上层主动调用GetEvevnt 获取事件。
+由多线程变为单线程，简化了处理。包装前是由输入线程回调上层设置的回调函数，每个输入设备都是一个独立的线程，所以回调函数要考虑多线程并发执行的问题，包装后多线程问题由EventBuffer处理掉了，上层通过GetEvent获取事件并处理，处理函数始终是在主线程中执行的，所以不用考虑与输入线程的并发问题了。
+IDirectFB_SetCooperativeLevel设置指定的IDirectFB对象与其它IDirectFB对象的协作级别，DFSCL_FULLSCREEN和DFSCL_EXCLUSIVE的处理方式是一样的，与DFSCL_NORMAL的差别是它们有自己独立的Context，也就是说设置为DFSCL_FULLSCREEN的DirectFB对象自成一个体系，不会与其它DirectFB对象干扰。在多进程情况下，一般是设置为DFSCL_NORMAL的，它保证所有窗口由同一个窗口器管理。(题外话，这个函数里调用了drop_window函数，drop_window的实现是有点问题的，它始终调用dfb_windowstack_cursor_enable去打开光标，这是不对的，应该根据据情况而定，在IDirectFB_Destruct里调用时就不应该打开光标，因为这可能会造成程序不正常退出。)
+
+输入设备事件所有GUI系统都是基于事件驱动模型的，搞清楚DirectFB事件处理过程对理解DirectFB是很有帮助的。这里介绍一下DirectFB的输入事件处理。
+
+输入设备驱动程序 输入设备驱动程序的代码是放在inputdrivers目录中的，编译之后安装到$(PREFIX)/lib/directfb-1.1-0/inputdrivers中。运行时每个驱动程序都会创建一个线程，它们通常都是挂在设备文件上，当有输入事件时就会被唤醒。唤醒后先读取输入事件，然后调用dfb_input_dispatch把事件分发给上层组件。
+要注意的是，输入设备线程是在driver_open_device里创建的，而driver_open_device是在dfb_core_create函数里调用的，也就是说线程起来的时候dfb_core可能还没有完成初始化，如果在这个时候有输入事件上来，可以会造成程序死掉。为了避免这个问题，应该在dfb_input_dispatch里检查一下dfb_core初始化是否完毕。
+
+dfb_input_dispatch先调用fixup_xxx函数对输入事件做些转换和映射，再调用core_input_filter对一些特殊键处理，比如屏幕截图等，再调用fusion_reactor_dispatch分发事件。分发时先通过函数_dfb_windowstack_inputdevice_listener把事件分发给窗口管理，然后再分发给其它全局回调函数，最后通过reactor把分发给用户注册的回调函数。
+_dfb_windowstack_inputdevice_listener通过dfb_wm_process_input调窗口管理器的wm_process_input函数。default窗口管理器是在这个函数里对输入事件处理的，它的实现比较简单，我们这里不讨论了。unique窗口管理里却不是以这种方式实现的，它调用dfb_input_add_global把_unique_device_listener注册为全局的输入事件的回调函数。其实unique也完全可以用dfb_wm_process_input来实现的，可能是实现者的想法不一样而已。
+_unique_device_listener则按输入设备类别把事件分发给相应的处理函数，这些函数是在devices中实现的。我们broncho平台的手写就是在pointer.c中拦截笔点事件的，现在想来，手写完全可以独立出来的。这些函数把DFBInputEvent事件转换为UniqueInputEvent事件，再调用unique_device_dispatch分发事件。
+unique_device_dispatch这里消息分为两路，一路经_unique_cursor_device_listener去更新当前光标的位置，一路经_unique_input_switch_device_listener把消息投递到焦点窗口。
+_unique_input_switch_device_listener消息经unique_input_channel_dispatch到_unique_window_input_channel_listener到dfb_window_post_event到IDirectFBEventBuffer_WindowReact到IDirectFBEventBuffer_AddItem，最后放入EventBuffer中。当然如果是多进程的情况，要经过内核模块fusion才能到达焦点窗口的EventBuffer。
+IDirectFBEventBuffer_GetEvent前面的函数都是都被动调用，由输入线程或者fusion事件线程调过来的。GetEvent则是上层主动调用的，它从EventBuffer的消息队列中获取事件，调用之前最好先调用WaitForEvent或者WaitForEventWithTimeout等待事件发生。
+IDirectFBEventBuffer_CreateFileDescriptor输入事件并不是唯一的事件，可能还有定时器，管道和网络事件等，WaitForEvent/WaitForEventWithTimeout会让主线程阻塞，按Unix下通用的做法是用select/poll挂在多事件源上，只要有事件发生select/poll就会唤醒，这样单线程就可以处理多事件源，CreateFileDescriptor创建一个文件描述符，可以用select/poll来等待事件。
+显示输出DirectFB可以输出到不同的目标上面，这个可以通过配置中的system指定。
+
+Surface Surface是一个概念简单而实现复杂的东西，它在功能上和Windows中的DeviceContext类似，提供基本绘图功能。每个窗口都和一个Surface关联，窗口上的控件与一个SubSurface关联。绘制结束后调用Flip更新到物理屏幕上。Surface一般是双缓冲，这主要是避免闪烁，Flip时并不总是BACK和FRONT交换。如果只是更新一个区域则是直接从BACK向FRONT拷贝这个区域的内容。
+IDirectFBSurface_Window_Flip实际上，普通Surface是不随便Flip的，因为它没有层次关系，直接刷新到屏幕上，整个显示就会乱了，所以只有DSCAPS_FLIPPING能力的特殊Surface才允许Flip。与窗口关联的Surface重载了Flip函数，用IDirectFBSurface_Window_Flip代替了IDirectFBSurface_Flip，这样Surface Flip的时候，它会调用dfb_window_repaint更新整个窗口栈中的窗口。
+wm_update_window这是窗口栈中的update函数，由dfb_window_repaint调用过来。它会根据窗口栈中窗口的层次和位置关系，决定哪些窗口的区域要更新，这部分代码相对来说是有点复杂的。
+dfb_layer_region_flip_update这是真正Flip了，它会调用primaryUpdateRegion去Flip。
+谁能更新物理屏幕?对于fbdev，master和slave都可以更新。对于x11只有master可以更新，slave通过fusion_call_execute请求master更新。
+\end{verbatim}
+
+
+\section{驱动总体结构}
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.0]{directfbdriverarch}\\
+  \caption{R600/R500 DirectFB驱动结构}\label{directfbdriverarch}
+\end{figure}
+
+如果没有硬件加速，directfb会使用软件操作，directfb的加速操作主要包括绘制线段，填充矩形，blit操作，在radeon显卡上如果3D功能正常运行的画，还会有绘制三角形的操作。
+
+这里先给出驱动的整体结构图，见图\ref{directfbdriverarch}。
+
+关于directfb驱动，我们关心两部分内容，一部分是system，一部分是gfxdriver。
+
+DirectFB的简称为"Direct Framebuffer"，最初依赖framebuffer设备提供显示，这里称framebuffer为显示后端。
+
+DirectFB可以使用多种后端显示图形输出结果，在源码system目录下面有多个后端：
+\begin{description}
+  \item[devmem] devmem后端，系统直接操作/dev/mem节点操作显存
+  \item[fbdev] 使用framebuffer后端
+  \item[osx] 使用osx操作系统作为图形后端
+  \item[sdl] 使用sdl作为图形后端
+  \item[vnc] 使用vnc作为图形后端
+  \item[x11] 使用X图形系统作为后端
+\end{description}
+
+根据我们系统环境的需要和平台的特点，我们选择fbdev系统。Linux内核中的drm驱动提供了framebuffer，但是这里的framebuffer基本上是drm驱动的一个附加产品（在“drm 的framebuffer驱动”中我们讨论了相关问题），而且内核只给了这里的framebuffer驱动仅供显示的一片内存，而且显卡的显存完全是由内核drm驱动管理的，但是directfb 的radeon显卡驱动是不使用drm的那一套显存管理方式的（猜测是有directfb的时候drm 还没有出现）。
+
+如果使用drm的framebuffer会碰到一些问题：
+\noindent 1）directfb驱动会认为fbdev映射出来的内存就是可以使用的全部显存，而且在既有的directfbr100~r300驱动中，是没有使用第二章我们说的GTT内存的，而且没有启用页表基址，做所有加速的时候只能使用vram内存，在这种情况下，我们考虑这样一个情形：进行硬件加速的blit操作，我们有一个图形要进行多次拷贝操作，要移动的源数据必须存在于vram，显示区域是最终合成的，源数据需要存储在非显示的区域中，然而单纯使用drm的framebuffer得到的vram只有显示部分的内存，这样硬件加速就没办法做了。[好像说的不是很清楚？？]
+
+\noindent 2）另外一个问题是我们注意到地址的问题，在第2章内存管理章节阶段我们提到过VM\_FB\_LOCATION寄存器，这个寄存器记录了vram在GPU虚拟地址空间的起始地址（通常起始地址配置为0x0）和长度，在既有directfb的r100~r300驱动中，根据这个寄存器读出来的地址作为后续进行硬件加速时使用vram的基地址，而且认为这个地址开始处就是用于显示的内存的地址，但是在内核drm驱动中，vram的前面一部分是用于页表之类的用于framebuffer的内存是从地址0xc0000（R580显卡 GPU地址）开始的，但是directfb 在进行硬件操作的时候读出来的地址是0x0，这样GPU进行硬件操作的地址和用于显示的地址是不同的。GPU认为显示的地址是0x0，而实际framebuffer处在0xc0000 处。
+
+在使用drm的framebuffer的情况下，可以使用如下的方法解决上面两个问题：
+
+第一个问题要解决显存不够的问题，在内核中，visiable vram是通过访问pci配置空间获取到的，在核外，可以使用libpciaccess来读取pci配置空间获取到全部的vram和IO（默认情况下fbdev认为通过mmap页可以映射IO，但是drm的framebuffer是不提供IO的映射的）。这样需要修改system/fbdev 的代码。
+
+第二个问题，可以通过在directfb的radeon中直接修改crtc的基址寄存器，将其内容修改为0x0，这样实际的显示区域和加速操作认为的显示区域就都是0x0，但是在进行双缓冲切换的时候也会碰到一些问题，fbdev的双缓冲是通过PAN\_DISPLAY来进行的，PAN\_DISPLAY调用后，内核drm的framebuffer驱动仍然会将crtc基地址设为framebuffer 驱动认为的地址，因而这里我们也需要修改一下。解决第二个问题的另外一个办法就是在进行硬件加速操作的时候地址都加上0xc0000这样一个偏移，当然也要考虑双缓冲切换的问题。
+
+上面两个问题上我们是通过修改fbdev，以修修补补的方式解决这个问题的，实际上，上面的办法还有一个问题无法解决，在进行双缓冲的时候，如果是在场同步的时候切换，则不会产生屏幕闪烁的情况，在“中断机制”一章我们分析过，如果vblank中断被开启，则在场同步的时候硬件会产生vblank中断通知软件，但是在既有的directfb的radeon驱动不依赖任何内核驱动，因而就无法获取中断，既有directfb radeon驱动使用轮询的方式以比较高的频率（应当保证轮询的时间间隔小于场同步显示处于空白期的时间）轮询中断状态寄存器，如果vblank的位被置位，则处于显示空白期，这时候可以发生切换，切换完成后将状态寄存器清除。然而在有内核drm驱动的情况下，内核drm驱动会处理中断，并在中断处理函数中将状态寄存器清除，这样核外的程序很难等到显示空白的时间。
+
+因此更为直接的方式是将内核的drm驱动扔掉，自己写一个驱动并导出一个framebuffer驱动，于是就有了我们图\ref{directfbdriverarch}中给出的程序结构。
+
+首先我们的内核驱动模块会完成原有的drm驱动完成的所有硬件初始化，包括显存的初始化以及页表机制，命令环机制等。我们将显示区域调整到0x0的位置，framebuffer驱动将剩余的全部vram映射出来，并且使用framebuffer驱动映射IO，这样，directfb中的fbdev不需要进行任何修改，将剩余的vram交给directfb之后，directfb会有一个简单的显存管理机制，因而在内核中我们无需担心对这片内存的管理。
+
+由于r500有单独2D引擎只需要简单读写寄存器就可以，而且部分代码可以参考既有的R300代码，所以这部分代码依然按照MMIO 的方式，因此这里没有命令处理，全部硬件操作都在VRAM 上进行，没有GTT，因此显存管理部分的代码也很简单。
+
+而R600情况则较为复杂，R600必须使用3D硬件完成2D加速操作，能够参考的R600 EXA驱动都是使用命令包操作GPU核心的寄存器【是必须使用命令包写】，因此这里必须编写完整的显存管理和命令处理等机制。
+
+\section{内核Framebuffer驱动}
+
+第\verb|\ref{ch1}|中使用了一段简单的代码演示了对Framebuffer设备的操作，核内framebuffer驱动必须提供相应的接口，核外程序才能正确访问和操作framebuffer，编写一个实现基本功能的Framebuffer驱动还是比较简单的。
+\begin{verbatim}
+233 int register_fb(struct radeon_device *rdev)
+234 {
+235     struct fb_info  *fbinfo;
+236     struct radeonfb_info  *info;
+......
+241     fbinfo = framebuffer_alloc(sizeof(struct radeonfb_info),
+242                 &(rdev->pdev->dev));
+243     info = fbinfo->par;
+244     info->dev = &(rdev->pdev->dev);
+245     info->fb = fbinfo;
+......
+256     fbinfo->fix = radeonfb_fix;
+257     fbinfo->var = radeonfb_var;
+258     fbinfo->fbops = &radeonfb_ops;
+259     fbinfo->flags = FBINFO_FLAG_DEFAULT;
+260     fbinfo->pseudo_palette = &info->pseudo_pal;
+261
+262     fbinfo->screen_base = rdev->fb_ptr;
+263     fbinfo->fix.smem_len = DISPLAY_SIZE;[后面需要修改]
+264     fbinfo->fix.smem_start = rdev->fb_phys;
+......
+271     ret = register_framebuffer(fbinfo);
+......
+279     return ret;
+280 }
+\end{verbatim}
+
+上面完成了framebuffer的注册过程，241-242行分配了一个framebuffer结构，271行注册framebuffer驱动，中间的代码主填充framebuffer结构。
+
+256行就是固定参数结构，257行是可变参数结构，本节开始使用的应用程序请求的可变和固定参数就是这两个结构体。
+
+258行是对framebuffer驱动的操作函数，本质上framebuffer是linux内核中的字符驱动，但是framebuffer驱动相当于是对字符驱动的封装。这里的操作函数和单纯的字符设备的操作函数是有区别的。在内核drivers/video/fbmem.c文件有如下代码：
+\begin{verbatim}
+1424 static const struct file_operations fb_fops = {
+1425     .owner =    THIS_MODULE,
+1426     .read =     fb_read,
+1427     .write =    fb_write,
+1428     .unlocked_ioctl = fb_ioctl,
+1429 #ifdef CONFIG_COMPAT
+1430     .compat_ioctl = fb_compat_ioctl,
+1431 #endif
+1432     .mmap =     fb_mmap,
+1433     .open =     fb_open,
+1434     .release =  fb_release,
+1435 #ifdef HAVE_ARCH_FB_UNMAPPED_AREA
+1436     .get_unmapped_area = get_fb_unmapped_area,
+1437 #endif
+1438 #ifdef CONFIG_FB_DEFERRED_IO
+1439     .fsync =    fb_deferred_io_fsync,
+1440 #endif
+1441 };
+\end{verbatim}
+
+这些才是作为字符设备的操作函数，选出其中一个read函数：
+\begin{verbatim}
+ 693 static ssize_t
+ 694 fb_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+ 695 {
+......
+ 711     if (info->fbops->fb_read)
+ 712         return info->fbops->fb_read(info, buf, count, ppos);
+\end{verbatim}
+
+只有当用户自己实现了fb\_read函数的时候才会调用用户自定义的函数，否则使用内核默认的操作。
+
+实际上，大部分framebuffer的操作函数都有默认的函，如果用户实现.fb\_set\_par 和.fb\_check\_var[mmap也可以使用内核默认的操作]两个函数就基本上能够让显卡工作了（默认的操作函数大多是运行在有自带显存的显卡上的，如果是使用系统内存作为显存的嵌入式系统，还需要提供mmap函数和读写操作函数）。fb\_set\_par根据可变结构体中的信息设置硬件，主要是修改分辨率以及改变当前显示区域内存的位置。当然，如果要实现上面应用程序的PAN\_DISPLAY操作，则还需要提供.pan\_display函数。
+关于分辨率的设置通常是framebuffer驱动中一个比较重要的问题，但是考虑到是嵌入式系统，在初始化分辨率之后，后面基本上不会修改，因而这里我们不会关心这方面的问题。
+
+260行设置伪调色板，伪调色板用于console，linux console在显示内容的时候最多支持16中颜色，但是通常设备都支持的颜色远超过这么多（比如RGB24位色深支持224种颜色），因而在伪调色板中设置16中颜色，console按照需要从伪颜色表中取颜色值。[需要确认？？]
+
+262-264设置帧缓冲使用的内存，这里记录了两个地址，262是内核虚拟地址，应用程序直接读取设备节点的时候，内核需要将显存的数据拷贝到用户空间，需要使用虚拟地址访问显存。264是物理地址，在将显存映射到用户空间的时候，需要使用物理地址（准确的说是物理页帧号）。
+
+在进行双缓冲切换的，核外程序需要做一个PAN\_DISPLAY的ioctl调用，内核framebuffer驱动需要实现.pan\_dispay。
+\begin{verbatim}
+347 static int radeonfb_pan_display(struct fb_var_screeninfo *var,struct fb_info *fb)
+348 {
+349     struct radeonfb_info *par = fb->par;
+350     u32 xoffset, yoffset;
+351     u32 offset;
+352     u32 xres, yres;
+353
+354     xres = var->xres;
+355     yres = var->yres;
+356     xoffset = var->xoffset;
+357     yoffset = var->yoffset;
+358     if(xoffset+xres > var->xres_virtual || yoffset+yres > var->yres_virtual)
+359         offset = 0;
+360     else
+361         offset =(yoffset * xres +  xoffset)*4;
+362
+363     *(unsigned int *)((( char *)(par->mmio_start))+0x6110)=offset;
+364     offset = *(unsigned int *)((( char *)(par->mmio_start))+0x6110);
+365     return 0;
+366 }
+\end{verbatim}
+[364和363行日后需要修改，对硬件的操作不放在framebuffer驱动中]。
+这里pan\_display函数根据传进来的yoffset切换显示画面的位置。
+
+由于还需要通过framebuffer驱动映射显卡IO，因此需要提供自己的mmap函数，默认操作是不提供IO映射的。
+\begin{verbatim}
+296 static int radeonfb_mmap(struct fb_info *info,
+297             struct vm_area_struct *vma)
+298 {
+299     unsigned long start = vma->vm_start;
+300     unsigned long size = vma->vm_end - vma->vm_start;
+301     unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+302     unsigned long pos;
+303
+304     if(offset == info->fix.smem_len){
+305         size_t mmio_size = ((struct radeonfb_info*)info->par)->mmio_size;
+306         pos = ((struct radeonfb_info*)info->par)->mmio_phys;
+307         if(size >((struct radeonfb_info*)info->par)->mmio_size){
+308             size = mmio_size;  // ok ??
+309         }
+310     }
+311     else {
+312         if (offset + size > info->fix.smem_len) {
+313             return -EINVAL;
+314         }
+315         pos = info->fix.smem_start + offset;
+316     }
+317     while (size > 0) {
+318         if (io_remap_pfn_range(AMD003AMD003vma, start, pos >> PAGE_SHIFT, PAGE_SIZE,
+319                 PAGE_SHARED)) {
+320             printk("[%s] mmap failed\n", __func__);
+321             return -EAGAIN;
+322         }
+323         start += PAGE_SIZE;
+324         pos += PAGE_SIZE;
+325     if (size > PAGE_SIZE)
+326         size -= PAGE_SIZE;
+327     else
+328         size = 0;
+329     }
+330     vma->vm_flags |= VM_RESERVED;
+331     return 0;
+332 }
+\end{verbatim}
+
+Framebuffer驱动从显卡驱动中得到了显存和寄存器的物理起始地址。有了物理地址，然后找到一个空闲的用户空间地址，将他们对应写入页表中，就建立了他们之间的映射关系，从而达到将显存或者寄存器映射到用户空间的目的。如果mmap传入的参数offset为fix.smem\_len，那就将IO地址映射到用户空间，否则就映射显存空间。
+
+\subsection{显存的使用}
+
+注意到驱动的主要部分都在核外，显存是映射到用户空间进行操作的。
+
+R500驱动只使用VRAM，因此VRAM直接通过Framebuffer驱动映射出来就可以了。
+
+R600驱动使用3D部件进行操作，至少命令环缓冲区（Ring buffer）、顶点缓冲区（Vertex buffer）需要使用GTT内存，GTT必须是可以进行DMA操作的内存，因此还必须在内核中分配并进行DMA映射。考虑在Mesa环境下，应用程序会根据需要请求DMA GTT内存
+（至少需要Vertex buffer），但是在当前的DirectFB R600驱动中，一次只有一个完整的绘图操作，而且一次绘图操作时间很短，不会被其他绘图操作打断。因此这里不会有动态DMA内存分配的需求，一次分配足够的DMA内存，然后全部映射出来就可以了。
+
+在R500驱动里，映射出来的内容分为两部分：VRAM和寄存器，fbdev中有一套自己的显存分配机制，被映射出来的VRAM被分成两部分，前面部分作为显示区域（要同内核framebuffer驱动约定好），包括当前的显示区域以及用于双环存切换的后备缓存。在硬件加速操作需要显存的时候，fbdev的分配器从显存的末端位置开始划分内存。
+
+在R600驱动中，还需要映射GTT内存，按照我们的需求手动将GTT分成index buffer和ring buffer两部分。
+
+\section{核外DirectFB图形系统显卡驱动（驱动运行流程 数据结构等等）}
+
+\section{R500 DirectFB 2D加速驱动}
+这里的2D加速全部是使用硬件上2D部件做的，2D部件能够完成基本的2D操作，但是不能够处理透明度和三角形绘制。
+
+Radeon的加速程序位于directfb的gfxdriver/radoen目录下。编译后会生成一个库文件，当需要加载硬件加速时，dfb将搜寻并加载这个库。找到库文件后，首先调用radeon.c的函数：
+\begin{verbatim}
+static int
+driver_probe( CoreGraphicsDevice *device )
+{
+    switch (dfb_gfxcard_get_accelerator( device )) {
+        case FB_ACCEL_ATI_RADEON:
+            return 1;
+        default:
+            break;
+    }
+    return 0;
+}
+\end{verbatim}
+
+只有当函数返回1时，这个库才算匹配上，真正的加载，匹配的条件就是radeon加速代号38。dfb\_gfxcard\_get\_accelerator函数，果有用户配置，返回用户配置的值，否则根据内核提供的framebuffer节点读出的信息返回。如果我们不在用户配置里配置，这里就匹配不上，因为从fb节点得到的值不是38，而是0.
+
+在dfb中，硬件加速驱动首先执行两个初始化函数：driver\_init\_driver  和driver\_init\_device。前一个函数主要得到了显卡的mmio地址和显存的起始地址：
+\begin{verbatim}
+rdrv->mmio_base = (volatile u8*) dfb_gfxcard_map_mmio( device, 0, 0x4000 );
+rdrv->fb_base = dfb_gfxcard_memory_virtual( device, 0 );
+\end{verbatim}
+
+这两个函数都需要内核的framebuffer驱动提供支持，关于细节后面讨论。
+接下来需要修改的是:
+\begin{verbatim}
+if (chip >= CHIP_R300) {
+funcs->CheckState   = r300CheckState;
+funcs->SetState     = r300SetState;
+}
+\end{verbatim}
+
+这里根据显卡的型号，实现不同的CheckState和SetState函数。我们的r500要有自己的实现，CheckState用于检查是否支持某种加速操作，SetState用于硬件加速的准备性工，作设置一些寄存器，如：颜色，绘制方向等。我们在上面的语句前加上：
+\begin{verbatim}
+if(1) {
+funcs->CheckState   = r500CheckState;
+funcs->SetState =r500SetState;
+}
+\end{verbatim}
+
+driver\_init\_device主要是通过都写显卡的寄存器，得到一些显卡的信息并进行设置，我们将对显卡的设置部分，也就是写寄存器的部分删除了，因为内核已经很好的初始化显卡。另外对于对齐要求有：
+\begin{verbatim}
+     device_info->limits.surface_byteoffset_alignment = 32;
+     device_info->limits.surface_pixelpitch_alignment = 64;
+     device_info->limits.surface_bytepitch_alignment  = 128;
+\end{verbatim}
+
+将第一行的改为1024，offset需要1k对齐。对于初始化的改动就完成了。这里还没有具体的画图工作。
+
+实现r500CheckState，只需要copy一份r300的CheckState，然后改好函数名就可以了。
+\begin{verbatim}
+static void r500SetState( void *drv, void *dev, GraphicsDeviceFuncs *funcs, CardState *state, DFBAccelerationMask accel )
+{
+	RadeonDriverData *rdrv = (RadeonDriverData*) drv;
+	RadeonDeviceData *rdev = (RadeonDeviceData*) dev;
+	void * mmio=rdrv->mmio_base;
+
+	rdev->set &= ~state->mod_hw;
+	if (DFB_BLITTING_FUNCTION( accel )) {
+		if ((rdev->accel ^ accel) & DFXL_TEXTRIANGLES)
+			rdev->set &= ~SMF_BLITTING_FLAGS;
+	}
+	rdev->accel = accel;
+	r500_set_destination(rdrv,rdev,state);
+	r500_set_clip(rdrv,rdev,state);
+	switch (accel) {
+		case DFXL_FILLRECTANGLE:
+		case DFXL_FILLTRIANGLE:
+		case DFXL_DRAWRECTANGLE:
+		case DFXL_DRAWLINE:
+			r500_set_drawing_color( rdrv, rdev, state );
+			//if (state->drawingflags & DSDRAW_BLEND)
+				//r300_set_blend_function( rdrv, rdev, state );
+			r500_set_drawingflags( rdrv, rdev, state );
+			funcs->DrawRectangle = r500drawrectangle;
+			funcs->FillRectangle = r500fillrectangle;
+			funcs->DrawLine = r500drawline;
+			state->set = rdev->drawing_mask;
+			break;
+		case DFXL_BLIT:
+		case DFXL_STRETCHBLIT:
+		case DFXL_TEXTRIANGLES:
+			r500_set_source( rdrv, rdev, state );
+			r500_set_blittingflags( rdrv, rdev, state );
+			state->set = (accel & DFXL_TEXTRIANGLES)
+				? : (rdev->blitting_mask & ~DFXL_TEXTRIANGLES);
+			break;
+		default:
+			D_BUG( "unexpected drawing/blitting function" );
+			break;
+	}
+	funcs->FillTriangle  = NULL;
+	funcs->Blit = r500blit;
+	funcs->EmitCommands  = NULL;
+	state->mod_hw = 0;
+}
+\end{verbatim}
+
+以上代码值得注意的是黑体部分，流程如图\ref{setstatepipe}。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=1.2]{setstatepipe}\\
+  \caption{set\_state函数流程图}\label{setstatepipe}
+\end{figure}
+
+
+首先是设置画图地址r500\_set\_destination，然后设置裁剪参数，然后根据不同的画图操作设置画图颜色和标志或者设置源地址和blit标志。接下来我们依次展开这些函数。
+
+
+\noindent \textbf{1） 设置绘图位置}
+\begin{verbatim}
+void r500_set_destination( RadeonDriverData *rdrv,  RadeonDeviceData *rdev,
+CardState*state )
+{
+    CoreSurface   *surface = state->destination;
+    CoreSurfaceBuffer *buffer  = state->dst.buffer;
+    volatile u8   *mmio= rdrv->mmio_base;
+    u32offset;
+    u32pitch;
+    u32format  = 0;
+    bool   dst_422 = false;
+
+    if (RADEON_IS_SET( DESTINATION ))
+        return;
+    offset=state->dst.offset + rdev->fb_offset;
+    pitch = state->dst.pitch;
+    if (rdev->dst_offset != offset ||
+            rdev->dst_pitch  != pitch ||
+            rdev->dst_format != buffer->format) {
+        format = R300_COLOR_FORMAT_ARGB8888;
+        rdev->gui_master_cntl = GMC_DST_32BPP;
+        rdev->gui_master_cntl |= GMC_DP_SRC_SOURCE_MEMORY  |
+                GMC_WR_MSK_DIS|
+                GMC_SRC_PITCH_OFFSET_CNTL |
+                GMC_DST_PITCH_OFFSET_CNTL |
+                GMC_DST_CLIPPING;
+        radeon_waitfifo( rdrv, rdev, 1 );
+        radeon_out32(mmio, RADEON_DST_PITCH_OFFSET,
+                            (( pitch/64)<<22) | (offset>>10));
+        if (rdev->dst_format != buffer->format) {
+            if (dst_422 && !rdev->dst_422) {
+                RADEON_UNSET( CLIP );
+                RADEON_UNSET( SOURCE );
+                rdev->src_format = DSPF_UNKNOWN;
+            }
+            RADEON_UNSET( COLOR );
+            RADEON_UNSET( DST_BLEND );
+        }
+        rdev->dst_format = buffer->format;
+        rdev->dst_offset = offset;
+        rdev->dst_pitch  = pitch;
+        rdev->dst_422= dst_422;
+    }
+    RADEON_SET( DESTINATION );
+}
+\end{verbatim}
+
+这个函数十分重要，设置了绘图时主要需要设置的寄存器，如果没有正确设置，图形不会被绘制出来或者绘制到错误的位置上。注意加粗的那部分代码，fb\_offset是framebuffer相对显存的偏移，dst.offset dst.pitch都是通过state传来的，暂时不用考虑。看到上面写寄存器的操作，你就明白为什么为什么offset必须1024对齐了吧，因为它写入寄存器时右移10位。图\ref{alignproblem}显示了不对齐的情况下出现的结果，图片被保存到了fbdev分配的一块surface中，然后通过硬件加速的方式blit到了屏幕显示区域，如果fbdev分配的内存不是1024字节对齐的，那么写入RADEON\_DST\_PITCH\_OFFSET寄存器的时候，后面10位会被截掉，但是显卡取数据的时候，只会从1024字节对齐的地址处开始取数据，这样就会出现图4-4左边出现的情况，右边是对齐情况下blit的结果。
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.7]{alignproblem}\\
+  \caption{对齐问题}\label{alignproblem}
+\end{figure}
+
+\noindent \textbf{2）设置裁剪参数}
+\begin{verbatim}
+void r500_set_clip( RadeonDriverData *rdrv,
+			RadeonDeviceData *rdev,
+				CardState	   *state )
+{
+	DFBRegion   *clip = &state->clip;
+	volatile u8 *mmio = rdrv->mmio_base;
+
+	if (RADEON_IS_SET( CLIP ))
+		return;
+	radeon_out32( mmio, SC_TOP_LEFT,
+		(clip->y1 << 16) | (clip->x1 & 0xffff) );
+	radeon_out32( mmio, SC_BOTTOM_RIGHT,
+		((clip->y2+1) << 16) | ((clip->x2+1) & 0xffff) );
+	rdev->clip = state->clip;
+	RADEON_SET( CLIP );
+}
+\end{verbatim}
+
+
+\noindent \textbf{3）设置了画图的背景色和画笔色}
+\begin{verbatim}
+void r500_set_drawing_color(RadeonDriverData *rdrv, RadeonDeviceData *rdev, CardState	   *state)
+{
+	void *mmio = rdrv->mmio_base;
+	unsigned int dp_brush_bkgd_clr = 0x00000000;
+	unsigned int dp_src_frgd_clr = 0xffffffff;
+	unsigned int dp_src_bkgd_clr = 0x00000000;
+	unsigned int dp_brush_frgd_clr = state->color.a << 24 |state->color.r<<16 |state->color.g<<8 | state->color.b;
+
+	OUT_ACCEL_REG(RADEON_DEFAULT_SC_BOTTOM_RIGHT,(0X1fff<<0)|(0x1fff<<16));
+	OUT_ACCEL_REG(RADEON_DP_BRUSH_FRGD_CLR, dp_brush_frgd_clr);
+	OUT_ACCEL_REG(RADEON_DP_BRUSH_BKGD_CLR, dp_brush_bkgd_clr);
+	OUT_ACCEL_REG(RADEON_DP_SRC_FRGD_CLR,   dp_src_frgd_clr);
+	OUT_ACCEL_REG(RADEON_DP_SRC_BKGD_CLR,   dp_src_bkgd_clr);
+	RADEON_SET( COLOR );
+}
+\end{verbatim}
+
+\noindent \textbf{4）设置绘图的方向和标志}
+
+\begin{verbatim}
+void r500_set_drawingflags( RadeonDriverData *rdrv,
+					   RadeonDeviceData *rdev,
+					   CardState	   *state )
+{
+	volatile u8   *mmio	   = rdrv->mmio_base;
+	u32  master_cntl = rdev->gui_master_cntl	  |
+					GMC_SRC_DATATYPE_MONO_FG_LA |
+					GMC_BRUSH_SOLID_COLOR  |
+					GMC_CLR_CMP_CNTL_DIS;
+	u32 rb3d_blend;
+
+	if (RADEON_IS_SET( DRAWING_FLAGS ))
+		return;
+	if (state->drawingflags & DSDRAW_XOR)
+		master_cntl |= GMC_ROP3_PATXOR;
+	else
+		master_cntl |= GMC_ROP3_PATCOPY;
+	radeon_waitfifo( rdrv, rdev, 2 );
+	radeon_out32( mmio, DP_GUI_MASTER_CNTL, master_cntl );
+	radeon_out32( mmio, DP_CNTL, DST_X_LEFT_TO_RIGHT | DST_Y_TOP_TO_BOTTOM );
+	rdev->drawingflags = state->drawingflags;
+	RADEON_SET  ( DRAWING_FLAGS );
+	RADEON_UNSET( BLITTING_FLAGS );
+}
+\end{verbatim}
+
+
+\noindent \textbf{5）设置blit标志}
+\begin{verbatim}
+void r500_set_blittingflags( RadeonDriverData *rdrv,
+					    RadeonDeviceData *rdev,
+					    CardState	 *state )
+{
+	volatile u8   *mmio	   = rdrv->mmio_base;
+	u32		  master_cntl = rdev->gui_master_cntl |
+						    GMC_BRUSH_NONE	   |
+						    GMC_SRC_DATATYPE_COLOR;
+	u32		  txfilter1   = R300_TX_TRI_PERF_0_8;
+	u32		  cmp_cntl    = 0;
+	u32		  rb3d_blend;
+	if (RADEON_IS_SET( BLITTING_FLAGS ))
+		return;
+	if (state->blittingflags & DSBLIT_SRC_COLORKEY) {
+		txfilter1 |= R300_CHROMA_KEY_FORCE;
+		cmp_cntl   = SRC_CMP_EQ_COLOR | CLR_CMP_SRC_SOURCE;
+	}
+	else {
+		master_cntl |= GMC_CLR_CMP_CNTL_DIS;
+	}
+
+	if (state->blittingflags & DSBLIT_XOR)
+		master_cntl |= GMC_ROP3_XOR;
+	else
+		master_cntl |= GMC_ROP3_SRCCOPY;
+	radeon_waitfifo( rdrv, rdev, 2 );
+	radeon_out32( mmio, CLR_CMP_CNTL, cmp_cntl );
+	radeon_out32( mmio, DP_GUI_MASTER_CNTL, master_cntl );
+rdev->drawingflags = state->drawingflags;
+
+	RADEON_UNSET  ( DRAWING_FLAGS );
+	RADEON_SET( BLITTING_FLAGS );
+}
+\end{verbatim}
+
+接下来介绍各个加速操作。读者读上面这些代码的时候可能已经注意到，上面这些操作写的寄存器的名称和第4章GPU命令包中命令包含的一些标志位名称相同，实际上后面各个加速操作往寄存器中填写的时俱和那些3型命令包的主体部分是类似的。我们选取blit过程，读者可参卡代码了解其它过程加速过程所写的寄存器。
+
+\begin{verbatim}
+bool r500blit(CardState *state, void *drv, void *dev,
+            DFBRectangle *sr, int dx, int dy )
+{
+    RadeonDeviceData *rdev = (RadeonDeviceData*) dev;
+    RadeonDriverData *rdrv = (RadeonDriverData*) drv;
+    unsigned int dir = 0;
+    volatile void * mmio=rdrv->mmio_base;
+    if (sr->x <= dx) {
+        sr->x += sr->w-1;
+        dx += sr->w-1;
+    }
+    else {
+        dir |= DST_X_LEFT_TO_RIGHT;
+    }
+    if(sr->y <= dy) {
+        sr->y += sr->h - 1;
+        dy += sr->h - 1;
+    }
+    else {
+        dir |= DST_Y_TOP_TO_BOTTOM;
+    }
+    OUT_ACCEL_REG(DP_CNTL, dir);
+    OUT_ACCEL_REG(SRC_Y_X, (sr->y << 16) | (sr->x));
+    OUT_ACCEL_REG(DST_Y_X, (dy << 16) | dx);
+    OUT_ACCEL_REG(DST_HEIGHT_WIDTH, (sr->h << 16) | (sr->w) );
+    return true;
+}
+\end{verbatim}
+
+Blit函数中判断源与目标的坐标大小，是为了决定copy的方向，blit是将内存中的一块framebuffer信息copy到另一个坐标。如果两块区域是重叠的，那么就会在拷贝中出现覆盖的现象。所以if语句就是调整拷贝的方和起始坐标。
+
+这里共操作了四个寄存器，DP\_CNTL寄存器控制拷贝方向，接下来两个分别是源坐标和目的坐标，最后是拷贝的宽高。
+
+具体到每个操作都不需要写很多寄存器，其实是因为分了很多个函数里面去了。每个画图函数里面只做它特有的操作，其他共性的操作都归类到SetState中的几个函数里去了。这样使重复的代码变少了，层次也很分明。
+
+\subsection{加速效果}
+使用df\_dok程序进行了测试，测试平台是一台Intel xx机器，DirectFB版本，使用-O3 参数优化。
+结果见图\ref{r5002d}，【予以适当说明】
+
+\begin{figure}
+  \centering
+  % Requires \usepackage{graphicx}
+  \includegraphics[scale=0.75]{r5002d}\\
+  \caption{R500显卡2D加速结果}\label{r5002d}
+\end{figure}
+
+
+\section{R600 DirectFB 2D加速驱动}
+
+
+
+\ifx \allfiles \undefined
+\end{document}
+\fi
